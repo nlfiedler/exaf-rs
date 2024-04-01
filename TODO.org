@@ -39,19 +39,18 @@
 |--------+------+--------------------------------|
 |      0 |    4 | File signature ('EXAF')        |
 |      4 |    2 | format version (major/minor)   |
-|      6 |    2 | header size in bytes           |
-|      8 |    2 | file byte order ('LE' or 'BE') |
-|     10 |    2 | optional field tag             |
-|     12 |    2 | optional field size in bytes   |
-|     14 |    n | optional field value           |
+|      6 |    2 | remaining header size in bytes |
+|      8 |    2 | optional field tag             |
+|     10 |    2 | optional field size in bytes   |
+|     12 |    n | optional field value           |
 |    ... |  ... | ...                            |
 *** optional fields
-| Name     | Purpose                                     |
-|----------+---------------------------------------------|
-| keyalgo  | key derivation algorithm (i.e. Argon2id)    |
-| salt     | random salt for encrypting password         |
-| iter     | number of iterations depending on KDF       |
-| encalgo  | encryption algorithm (AES, Blowfish, etc)   |
+| Name    | Purpose                                   | Tag  |
+|---------+-------------------------------------------+------|
+| keyalgo | key derivation algorithm (i.e. Argon2id)  | 'KD' |
+| salt    | random salt for encrypting password       | 'SA' |
+| iter    | number of iterations depending on KDF     | 'IT' |
+| encalgo | encryption algorithm (AES, Blowfish, etc) | 'EA' |
 *** more optional fields can be added over time
 *** field values will never be longer than 64 KB
 | Name  | Size | Purpose                       |

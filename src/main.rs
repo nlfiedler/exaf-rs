@@ -32,9 +32,6 @@ pub enum Error {
     /// TODO: this will go away
     #[error("unsupported header size")]
     TempUnsupportedHdrSize,
-    /// TODO: this will go away
-    #[error("unsupported file endianness")]
-    TempUnsupportedEndianness,
     /// A header was missing a required tag row.
     #[error("missing required tag from header: {0}")]
     MissingTag(String),
@@ -316,10 +313,9 @@ impl FileEntry {
     }
 }
 
-// TODO: detect system endianness and write LE or BE
-// TODO: write the version and header size using BE
 fn write_archive_header<W: Write>(mut output: W) -> io::Result<()> {
-    let version = [b'E', b'X', b'A', b'F', 1, 0, 0, 10, b'L', b'E'];
+    // TODO: write the version and remaining header size using BE
+    let version = [b'E', b'X', b'A', b'F', 1, 0, 0, 0];
     output.write_all(&version)?;
     Ok(())
 }
@@ -432,7 +428,7 @@ fn add_file<P: AsRef<Path>, W: Write + Seek>(infile: P, mut output: W) -> io::Re
 
 fn read_archive_header<P: AsRef<Path>>(infile: P) -> Result<File, Error> {
     let mut input = File::open(infile)?;
-    let mut archive_start = [0; 10];
+    let mut archive_start = [0; 8];
     input.read_exact(&mut archive_start)?;
     if archive_start[0..4] != [b'E', b'X', b'A', b'F'] {
         return Err(Error::MissingMagic);
@@ -440,11 +436,9 @@ fn read_archive_header<P: AsRef<Path>>(infile: P) -> Result<File, Error> {
     if archive_start[4..6] != [1, 0] {
         return Err(Error::UnsupportedVersion);
     }
-    if archive_start[6..8] != [0, 10] {
+    // TODO: read the remaining header size, then skip that many bytes
+    if archive_start[6..8] != [0, 0] {
         return Err(Error::TempUnsupportedHdrSize);
-    }
-    if archive_start[8..10] != [b'L', b'E'] {
-        return Err(Error::TempUnsupportedEndianness);
     }
     Ok(input)
 }
@@ -479,13 +473,13 @@ fn list_files<R: Read + Seek>(mut input: R) -> Result<(), Error> {
 }
 
 fn main() {
-    // let infile = PathBuf::from("README.md");
-    // let mut outfile = File::create("output.exaf").expect("could not create file");
-    // write_archive_header(&mut outfile).expect("could not write header");
-    // add_file(infile, &mut outfile).expect("could not add file");
-    // println!("Archive created");
+    let infile = PathBuf::from("README.md");
+    let mut outfile = File::create("output.exaf").expect("could not create file");
+    write_archive_header(&mut outfile).expect("could not write header");
+    add_file(infile, &mut outfile).expect("could not add file");
+    println!("Archive created");
     let infile = PathBuf::from("output.exaf");
     let input = read_archive_header(&infile).expect("could not write header");
     list_files(input).expect("could not add file");
-    println!("Archive extracted");
+    println!("Archive examined");
 }
