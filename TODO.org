@@ -1,0 +1,245 @@
+* New pack file format
+** an archiver/compressor
+** support strong encryption
+** avoid mistakes of legacy formats
+* Features
+** published both as a library and an executable binary
+** follows symlinks or not, depending on options
+** preserves ownership and permissions, or not to conserve space
+** saves all available directory and file metadata
+** strong encryption using a password and random salt
+** extensible format for archive and entry headers
+** encrypted packs cannot have their contents listed
+** should be efficient for small chunks of data
+** each file may be optionally compressed
+** handle any number of files of any size
+** support different hash digests for data verification
+** support different key derivation functions
+** support different encryption algorithms
+** support different compression algorithms
+* Format
+** Considerations
+*** future-proof, extensible format supporting optional fields of various lengths
+*** records various metadata about files and directories if available from OS
+*** records whether file data is Big Endian or Little Endian
+*** fields are always network byte order (Big Endian)
+*** may include data checksums for verification
+*** textual data is UTF-8 encoded
+*** XML is flexible, supports complex data types
+*** JSON is smaller than XML, easy to parse
+*** EXIF style is very compact (rows of tuples consisting of tag, size, value)
+** Encrytion
+*** password is used to derive a key using one of various algorithms, typically with a salt
+*** derived key (aka secret) is used to perform symmetric-key encryption on the file data
+*** directory/file header data rows are encrypted to prevent listing of archive contents
+** Archive header
+*** header size limited to 64 KB
+*** EXIF style entries after the initial version-specific rows
+| Offset | Size | Purpose                        |
+|--------+------+--------------------------------|
+|      0 |    4 | File signature ('EXAF')        |
+|      4 |    2 | format version (major/minor)   |
+|      6 |    2 | header size in bytes           |
+|      8 |    2 | file byte order ('LE' or 'BE') |
+|     10 |    2 | optional field tag             |
+|     12 |    2 | optional field size in bytes   |
+|     14 |    n | optional field value           |
+|    ... |  ... | ...                            |
+*** optional fields
+| Name     | Purpose                                     |
+|----------+---------------------------------------------|
+| keyalgo  | key derivation algorithm (i.e. Argon2id)    |
+| salt     | random salt for encrypting password         |
+| iter     | number of iterations depending on KDF       |
+| encalgo  | encryption algorithm (AES, Blowfish, etc)   |
+*** more optional fields can be added over time
+*** field values will never be longer than 64 KB
+| Name  | Size | Purpose                       |
+|-------+------+-------------------------------|
+| Tag   |    2 | uniquely identifies the field |
+| Size  |    2 | length of the field value     |
+| Value |    N | field value                   |
+** Archive entry considerations
+*** will need to ensure that any extended attributes are less than 64 KB
+*** directory entries are optional, but must appear before files that refer to them
+*** duplicate directory entries are allowed for easier addition of files
+** Archive entry structure
+*** all file paths and names are UTF-8 encoded
+*** entry header will never be longer than 64 KB
+*** entry date/time is ~Unix time~ (seconds since the epoch) as 32 or 64 bits
+**** https://en.wikipedia.org/wiki/Unix_time
+**** length of the field will be either 4 (32 bits) or 8 (64 bits)
+*** each entry consists of two or three blocks of data
+| Name         | Size | Purpose                              |
+|--------------+------+--------------------------------------|
+| Header size  | 2    | length of the header in bytes        |
+| Header value | N    | header table rows as described below |
+| File data    | M    | files only: compressed data          |
+*** header rows consist of 2 + 2 + N bytes (tag, size, value)
+*** entry with row tag of =ID= is a directory while one with =DI= is a file
+*** field values will never be longer than 64 KB
+| Name  | Size | Purpose                       |
+|-------+------+-------------------------------|
+| Tag   |    2 | uniquely identifies the field |
+| Size  |    2 | length of the field value     |
+| Value |    N | field value                   |
+** Archive entry representing a directory
+*** codifies each unique path as a numeric value for efficiency
+*** fields
+| Name  | Purpose                             | Required? | Tag  |
+|-------+-------------------------------------+-----------+------|
+| id    | Unique identifier                   | yes       | 'ID' |
+| path  | path value as UTF-8                 | yes       | 'PA' |
+| mode  | Unix mode                           |           | 'MO' |
+| attrs | Windows file attributes             |           | 'FA' |
+| mtime | modification date/time as Unix time |           | 'MT' |
+| ctime | creation date/time as Unix time     |           | 'CT' |
+| atime | access date/time as Unix time       |           | 'AT' |
+| xattr | Extended file system attributes     |           | 'XA' |
+| user  | name of FS owner                    |           | 'UN' |
+| uid   | user identifier                     |           | 'UI' |
+| group | name of FS group                    |           | 'GN' |
+| gid   | group identifier                    |           | 'GI' |
+*** example entry
+| Tag  | Size | Value                        |
+|------+------+------------------------------|
+| 'MO' |    2 | 0o40755                      |
+| 'ID' |    4 | 16344                        |
+| 'PA' |   28 | node_modules/saml2-js/lib-js |
+| 'MT' |    4 | 0x6604C3BF                   |
+| 'UN' |    8 | nfiedler                     |
+| 'UI' |    2 | 501                          |
+| 'GN' |    5 | staff                        |
+| 'GI' |    2 | 20                           |
+** Archive entry representing a file
+*** fields
+| Name     | Purpose                             | Required? | Tag  | Size |
+|----------+-------------------------------------+-----------+------+------|
+| name     | name of file or directory           | yes       | 'NM' | vary |
+| origlen  | byte size of original data          | yes       | 'SZ' | 8    |
+| mode     | Unix mode                           |           | 'MO' | 2    |
+| attrs    | Windows file attributes             |           | 'FA' | 4    |
+| dirid    | directory identifier                |           | 'DI' | 4    |
+| complen  | byte size of compressed data        |           | 'LN' | 8    |
+| compalgo | compression algorithm               |           | 'CA' | 4    |
+| hashalgo | hash digest algorithm               |           | 'HA' | 4    |
+| checksum | hash digest of original data        |           | 'CS' | vary |
+| mtime    | modification date/time as Unix time |           | 'MT' | 4    |
+| ctime    | creation date/time as Unix time     |           | 'CT' | 4    |
+| atime    | access date/time as Unix time       |           | 'AT' | 4    |
+| xattr    | Extended file system attributes     |           | 'XA' | vary |
+| user     | name of FS owner                    |           | 'UN' | vary |
+| uid      | user identifier                     |           | 'UI' | 2    |
+| group    | name of FS group                    |           | 'GN' | vary |
+| gid      | group identifier                    |           | 'GI' | 2    |
+*** example entry
+| Tag  | Size |                                      Value |
+|------+------+--------------------------------------------|
+| 'NM' |   16 |                           take_snapshot.rs |
+| 'SZ' |    8 |                                      45130 |
+| 'MO' |    2 |                                   0o100644 |
+| 'DI' |    4 |                                      16344 |
+| 'LN' |    8 |                                       7205 |
+| 'CA' |    4 |                                     'LZMA' |
+| 'HA' |    4 |                                     'SHA1' |
+| 'CS' |   20 | 0xf29e0d471f31aca38e263720cb84ef5c7708a141 |
+| 'MT' |    4 |                                 0x6604C3BF |
+| 'UN' |    8 |                                   nfiedler |
+| 'UI' |    2 |                                        501 |
+| 'GN' |    5 |                                      staff |
+| 'GI' |    2 |                                         20 |
+** XAR-style table-of-contents vs tar-style header/data pairs
+*** XAR seems hugely complex to both generate the TOC as well as add an additional file later
+*** TAR style means recording file tree structure is more difficult, probably
+**** could simply encode the directories again, before the new file
+*** TAR style allows for very easy addition of new files
+* Action Plan
+** Proof of Concept
+*** write some code to get started, creating a =pack= and =unpack= binary
+*** focus on making it work rather than a great design and unit tests
+*** action plan
+**** DONE pack a single file w/o compression
+**** DONE add file metadata
+**** DONE add checksum field
+**** DONE add compression
+**** TODO unpack the file
+**** TODO add directory entries to the archive
+**** TODO recurse a directory
+**** TODO add an additional file to an existing archive
+**** TODO extract one particular file from an archive
+**** TODO test on Windows
+**** TODO add encryption
+** additional features
+*** list contents of an archive
+*** record symbolic links
+*** follow symbolic links
+*** record extended attributes
+*** file/directory exclusion patterns on archive
+*** file/directory exclusion patterns on extract
+*** "delete" files from an archive by making them disappear? zip does this
+** library
+*** allow many of the dependencies to be optional (e.g. zstandard)
+*** read optional archive header tags into a map
+*** create a reader and writer like the =tar= crate
+*** allow for additional tag types not already in the spec
+* Questions
+** should archive and entry headers be checksummed (md5 or sha1)?
+** data recovery (a la error correction)? 7zip, zip lack this, RAR has it
+** what about Windows directory/file ownership and permissions?
+** what about deduplicating files on the way into the archive?
+*** that would be much more complex for both compressing and decompressing
+*** would need a way for the duplicate to refer back to an earlier entry
+* Reference
+** Compression algorithms for consideration
+| Name  | Description              |
+|-------+--------------------------|
+| LZMA  | Improved version of LZ77 |
+| LZMA2 | Improved version of LZMA |
+| BZip2 | Standard BWT algorithm   |
+| Copy  | No compression method    |
+** Key derivation functions for consideration
+*** from https://en.wikipedia.org/wiki/Key_derivation_function
+: In 2013 a Password Hashing Competition was announced to choose a new,
+: standard algorithm for password hashing. On 20 July 2015 the competition
+: ended and Argon2 was announced as the final winner. Four other algorithms
+: received special recognition: Catena, Lyra2, Makwa, and yescrypt. As of
+: May 2023, OWASP recommends the following KDFs for password hashing, listed
+: in order of priority:
+- Argon2id
+- scrypt if Argon2id is unavailable
+- bcrypt for legacy systems
+- PBKDF2 if FIPS-140 compliance is required
+** Symmetric-key algorithms for consideration
+- Twofish
+- Serpent
+- AES
+- Camellia
+- Salsa20
+- ChaCha20
+- Blowfish
+- CAST5
+- Kuznyechik
+- RC4
+- DES
+- 3DES
+- Skipjack
+- Safer
+- IDEA
+* Alternatives
+** Pack
+*** https://github.com/PackOrganization/Pack
+*** appears to compress files into an SQLite database file
+** zip
+*** flawed encryption
+*** https://users.cs.jmu.edu/buchhofp/forensics/formats/pkzip.html
+** tar
+*** https://www.gnu.org/software/tar/manual/html_node/Standard.html
+*** there is much overhead per entry
+*** compression requires separate tool
+** 7-zip
+*** https://www.7-zip.org
+*** encrypted files can still have their contents listed
+*** does not store file permissions
+** xar
+*** https://en.wikipedia.org/wiki/Xar_(archiver)
+*** not widely available

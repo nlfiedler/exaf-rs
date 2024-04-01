@@ -1,0 +1,18 @@
+[package]
+name = "exaf"
+version = "0.1.0"
+edition = "2021"
+authors = ["Nathan Fiedler <nathanfiedler@fastmail.fm>"]
+description = "Extensible archiver format."
+repository = "https://github.com/nlfiedler/exaf"
+readme = "README.md"
+keywords = ["archiver", "compressor"]
+license = "MIT"
+default-run = "exaf"
+
+[dependencies]
+chrono = "0.4.37"
+libc = "0.2.153"
+sha-1 = "0.10.1"
+thiserror = "1.0.58"
+zstd = "0.13.1"
