@@ -66,7 +66,7 @@ pub fn unix_mode<P: AsRef<Path>>(path: P) -> Option<u32> {
 }
 
 #[cfg(target_family = "windows")]
-pub fn unix_mode<P: AsRef<Path>>(path: P) -> Option<u32> {
+pub fn unix_mode<P: AsRef<Path>>(_path: P) -> Option<u32> {
     None
 }
 
@@ -106,14 +106,14 @@ pub struct EntryMetadata {
     /// Name of the owning group.
     pub group: Option<String>,
     /// Created time of the entry.
-    pub ctime: DateTime<Utc>,
+    pub ctime: Option<DateTime<Utc>>,
     /// Modification time of the entry.
-    pub mtime: DateTime<Utc>,
+    pub mtime: Option<DateTime<Utc>>,
     /// Accessed time of the entry.
-    pub atime: DateTime<Utc>,
+    pub atime: Option<DateTime<Utc>>,
     // Set of extended file attributes, if any. The key is the name of the
     // extended attribute, and the value raw data from the file system.
-    pub xattrs: HashMap<String, Vec<u8>>,
+    pub xattrs: Option<HashMap<String, Vec<u8>>>,
 }
 
 impl EntryMetadata {
@@ -124,16 +124,25 @@ impl EntryMetadata {
         let name = get_file_name(path.as_ref());
         let metadata = fs::symlink_metadata(path.as_ref());
         let mtime = match metadata.as_ref() {
-            Ok(attr) => attr.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-            Err(_) => SystemTime::UNIX_EPOCH,
+            Ok(attr) => {
+                let mt = attr.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                Some(DateTime::<Utc>::from(mt))
+            },
+            Err(_) => None,
         };
         let ctime = match metadata.as_ref() {
-            Ok(attr) => attr.created().unwrap_or(SystemTime::UNIX_EPOCH),
-            Err(_) => SystemTime::UNIX_EPOCH,
+            Ok(attr) => {
+                let ct = attr.created().unwrap_or(SystemTime::UNIX_EPOCH);
+                Some(DateTime::<Utc>::from(ct))
+            },
+            Err(_) => None,
         };
         let atime = match metadata.as_ref() {
-            Ok(attr) => attr.accessed().unwrap_or(SystemTime::UNIX_EPOCH),
-            Err(_) => SystemTime::UNIX_EPOCH,
+            Ok(attr) => {
+                let at = attr.accessed().unwrap_or(SystemTime::UNIX_EPOCH);
+                Some(DateTime::<Utc>::from(at))
+            },
+            Err(_) => None,
         };
         let mode = unix_mode(path.as_ref());
         let attrs = file_attrs(path.as_ref());
@@ -145,10 +154,10 @@ impl EntryMetadata {
             gid: None,
             user: None,
             group: None,
-            ctime: DateTime::<Utc>::from(ctime),
-            mtime: DateTime::<Utc>::from(mtime),
-            atime: DateTime::<Utc>::from(atime),
-            xattrs: HashMap::new(),
+            ctime,
+            mtime,
+            atime,
+            xattrs: None,
         };
         em.owners(path.as_ref())
     }
@@ -169,10 +178,10 @@ impl EntryMetadata {
                 gid: None,
                 user: None,
                 group: None,
-                ctime: DateTime::<Utc>::from(SystemTime::UNIX_EPOCH),
-                mtime: DateTime::<Utc>::from(SystemTime::UNIX_EPOCH),
-                atime: DateTime::<Utc>::from(SystemTime::UNIX_EPOCH),
-                xattrs: HashMap::new(),
+                ctime: None,
+                mtime: None,
+                atime: None,
+                xattrs: None,
             })
         } else {
             return Err(Error::MissingTag("NM".into()));
@@ -344,7 +353,12 @@ fn make_file_header(file_entry: &FileEntry) -> io::Result<Vec<u8>> {
         header.write_all(&unix_mode[2..])?;
     }
 
-    // TODO: add FA field
+    // FA: Windows file attributes, if available
+    if let Some(attrs) = file_entry.metadata.attrs {
+        header.write_all(&[b'F', b'A', 0, 4])?;
+        let file_attrs = u32::to_be_bytes(attrs);
+        header.write_all(&file_attrs)?;
+    }
 
     // HA: hash digest algorithm
     if let Some(algo) = file_entry.hash_algo.as_ref() {
@@ -362,9 +376,28 @@ fn make_file_header(file_entry: &FileEntry) -> io::Result<Vec<u8>> {
     }
 
     // TODO: write DI
-    // TODO: write MT
-    // TODO: write CT
-    // TODO: write AT
+
+    // MT: modified time, if available
+    if let Some(mt) = file_entry.metadata.mtime {
+        header.write_all(&[b'M', b'T', 0, 8])?;
+        let unix_time = i64::to_be_bytes(mt.timestamp());
+        header.write_all(&unix_time)?;
+    }
+
+    // CT: creation time, if available
+    if let Some(ct) = file_entry.metadata.ctime {
+        header.write_all(&[b'C', b'T', 0, 8])?;
+        let unix_time = i64::to_be_bytes(ct.timestamp());
+        header.write_all(&unix_time)?;
+    }
+
+    // AT: last accessed time, if available
+    if let Some(at) = file_entry.metadata.atime {
+        header.write_all(&[b'A', b'T', 0, 8])?;
+        let unix_time = i64::to_be_bytes(at.timestamp());
+        header.write_all(&unix_time)?;
+    }
+
     // TODO: write XA
     // TODO: write UN
     // TODO: write UI
@@ -468,12 +501,12 @@ fn list_files<R: Read + Seek>(mut input: R) -> Result<(), Error> {
     // create a FileEntry from the supported tags in the HashMap
     let entry = FileEntry::from_map(&rows)?;
     println!("entry: {:?}", entry);
-    // TODO: read the file data, decrypt, print
+    // TODO: read the file data, decompress, print
     Ok(())
 }
 
 fn main() {
-    let infile = PathBuf::from("README.md");
+    let infile = PathBuf::from("LICENSE");
     let mut outfile = File::create("output.exaf").expect("could not create file");
     write_archive_header(&mut outfile).expect("could not write header");
     add_file(infile, &mut outfile).expect("could not add file");

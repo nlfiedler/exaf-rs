@@ -123,9 +123,9 @@
 | compalgo | compression algorithm               |           | 'CA' | 4    |
 | hashalgo | hash digest algorithm               |           | 'HA' | 4    |
 | checksum | hash digest of original data        |           | 'CS' | vary |
-| mtime    | modification date/time as Unix time |           | 'MT' | 4    |
-| ctime    | creation date/time as Unix time     |           | 'CT' | 4    |
-| atime    | access date/time as Unix time       |           | 'AT' | 4    |
+| mtime    | modification date/time as Unix time |           | 'MT' | 8    |
+| ctime    | creation date/time as Unix time     |           | 'CT' | 8    |
+| atime    | access date/time as Unix time       |           | 'AT' | 8    |
 | xattr    | Extended file system attributes     |           | 'XA' | vary |
 | user     | name of FS owner                    |           | 'UN' | vary |
 | uid      | user identifier                     |           | 'UI' | 2    |
