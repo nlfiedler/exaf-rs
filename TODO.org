@@ -147,6 +147,11 @@
 | 'UI' |    2 |                                        501 |
 | 'GN' |    5 |                                      staff |
 | 'GI' |    2 |                                         20 |
+** Custom format versus CBOR
+*** CBOR is basically a standard for every kind of time
+*** custom type header size for =LICENSE= example: 119 bytes
+*** CBOR header size for =LICENSE= example: 140 bytes
+*** CBOR serializes the byte vector as 2x actual data size
 ** XAR-style table-of-contents vs tar-style header/data pairs
 *** XAR seems hugely complex to both generate the TOC as well as add an additional file later
 *** TAR style means recording file tree structure is more difficult, probably
@@ -165,9 +170,19 @@
 **** TODO add directory entries to the archive
 **** TODO recurse a directory
 **** TODO add an additional file to an existing archive
+**** TODO determine lower bound for compressing files (below a certain size it won't help)
 **** TODO extract one particular file from an archive
-**** TODO test on Windows
+**** DONE test on Windows
 **** TODO add encryption
+** develop specification
+*** determine the byte format and what makes the most sense
+*** write the specification as a separate document
+*** draw diagrams to help visualize the byte layout
+*** provide guidance and examples for implementation
+** test and benchmark
+*** test with a real-life directory structure consisting only of zero-length files
+**** idea is to measure overhead without any file content
+*** use a snapshot of the Linux source tree, compare to Pack (see issue #4)
 ** additional features
 *** list contents of an archive
 *** record symbolic links

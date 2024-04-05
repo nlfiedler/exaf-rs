@@ -17,6 +17,9 @@ pub enum Error {
     /// Error occurred decoding a UTF-8 string from bytes.
     #[error("UTF-8 error: {0}")]
     Utf8Error(#[from] std::str::Utf8Error),
+    /// Error occurred decoding a UTF-8 string from bytes.
+    #[error("UTF-8 error: {0}")]
+    FromUtf8Error(#[from] std::string::FromUtf8Error),
     /// Error occurred attempting to manipulate a slice.
     #[error("Slice error: {0}")]
     SliceError(#[from] std::array::TryFromSliceError),
@@ -88,6 +91,56 @@ pub fn file_attrs<P: AsRef<Path>>(path: P) -> Option<u32> {
     }
 }
 
+fn get_header_str(rows: &HashMap<u16, Vec<u8>>, key: &u16) -> Result<Option<String>, Error> {
+    if let Some(row) = rows.get(key) {
+        let s = String::from_utf8(row.to_owned())?;
+        Ok(Some(s))
+    } else {
+        Ok(None)
+    }
+}
+
+fn get_header_u32(rows: &HashMap<u16, Vec<u8>>, key: &u16) -> Result<Option<u32>, Error> {
+    if let Some(row) = rows.get(key) {
+        let raw: [u8; 4] = row[0..4].try_into()?;
+        let v = u32::from_be_bytes(raw);
+        Ok(Some(v))
+    } else {
+        Ok(None)
+    }
+}
+
+fn get_header_u64(rows: &HashMap<u16, Vec<u8>>, key: &u16) -> Result<Option<u64>, Error> {
+    if let Some(row) = rows.get(key) {
+        let raw: [u8; 8] = row[0..8].try_into()?;
+        let v = u64::from_be_bytes(raw);
+        Ok(Some(v))
+    } else {
+        Ok(None)
+    }
+}
+
+fn get_header_time(
+    rows: &HashMap<u16, Vec<u8>>,
+    key: &u16,
+) -> Result<Option<DateTime<Utc>>, Error> {
+    if let Some(row) = rows.get(key) {
+        let raw: [u8; 8] = row[0..8].try_into()?;
+        let secs = i64::from_be_bytes(raw);
+        Ok(DateTime::from_timestamp(secs, 0))
+    } else {
+        Ok(None)
+    }
+}
+
+fn get_header_bytes(rows: &HashMap<u16, Vec<u8>>, key: &u16) -> Result<Option<Vec<u8>>, Error> {
+    if let Some(row) = rows.get(key) {
+        Ok(Some(row.to_owned()))
+    } else {
+        Ok(None)
+    }
+}
+
 /// A file, directory, or symbolic link within a tree.
 #[derive(Clone, Debug)]
 pub struct EntryMetadata {
@@ -127,21 +180,21 @@ impl EntryMetadata {
             Ok(attr) => {
                 let mt = attr.modified().unwrap_or(SystemTime::UNIX_EPOCH);
                 Some(DateTime::<Utc>::from(mt))
-            },
+            }
             Err(_) => None,
         };
         let ctime = match metadata.as_ref() {
             Ok(attr) => {
                 let ct = attr.created().unwrap_or(SystemTime::UNIX_EPOCH);
                 Some(DateTime::<Utc>::from(ct))
-            },
+            }
             Err(_) => None,
         };
         let atime = match metadata.as_ref() {
             Ok(attr) => {
                 let at = attr.accessed().unwrap_or(SystemTime::UNIX_EPOCH);
                 Some(DateTime::<Utc>::from(at))
-            },
+            }
             Err(_) => None,
         };
         let mode = unix_mode(path.as_ref());
@@ -166,26 +219,30 @@ impl EntryMetadata {
     /// Construct metadata from the map of tags and values.
     ///
     pub fn from_map(rows: &HashMap<u16, Vec<u8>>) -> Result<Self, Error> {
-        if rows.contains_key(&0x4e4d) {
-            let raw = &rows[&0x4e4d];
-            let name = std::str::from_utf8(raw)?;
-            // TODO: extract the rest of the values
-            Ok(Self {
-                name: name.to_string(),
-                mode: None,
-                attrs: None,
-                uid: None,
-                gid: None,
-                user: None,
-                group: None,
-                ctime: None,
-                mtime: None,
-                atime: None,
-                xattrs: None,
-            })
-        } else {
-            return Err(Error::MissingTag("NM".into()));
-        }
+        let name = get_header_str(rows, &0x4e4d)?.ok_or_else(|| Error::MissingTag("NM".into()))?;
+        let mode = get_header_u32(rows, &0x4d4f)?;
+        let attrs = get_header_u32(rows, &0x4641)?;
+        let uid = get_header_u32(rows, &0x5549)?;
+        let gid = get_header_u32(rows, &0x4749)?;
+        let user = get_header_str(rows, &0x554e)?;
+        let group = get_header_str(rows, &0x474e)?;
+        let ctime = get_header_time(rows, &0x4354)?;
+        let mtime = get_header_time(rows, &0x4d54)?;
+        let atime = get_header_time(rows, &0x4154)?;
+        // TODO: extract the extended attributes map
+        Ok(Self {
+            name,
+            mode,
+            attrs,
+            uid,
+            gid,
+            user,
+            group,
+            ctime,
+            mtime,
+            atime,
+            xattrs: None,
+        })
     }
 
     ///
@@ -287,23 +344,22 @@ impl FileEntry {
     ///
     pub fn from_map(rows: &HashMap<u16, Vec<u8>>) -> Result<Self, Error> {
         let metadata = EntryMetadata::from_map(&rows)?;
-        if rows.contains_key(&0x535a) {
-            let raw = &rows[&0x535a];
-            let len: [u8; 8] = raw[0..8].try_into()?;
-            let original_len = u64::from_be_bytes(len);
-            // TODO: extract the rest of the values
-            Ok(Self {
-                metadata,
-                directory: None,
-                original_len,
-                compressed_len: None,
-                comp_algo: None,
-                hash_algo: None,
-                checksum: None,
-            })
-        } else {
-            Err(Error::MissingTag("SZ".into()))
-        }
+        let original_len =
+            get_header_u64(rows, &0x535a)?.ok_or_else(|| Error::MissingTag("SZ".into()))?;
+        let compressed_len = get_header_u64(rows, &0x4c4e)?;
+        let comp_algo = get_header_str(rows, &0x4341)?;
+        let hash_algo = get_header_str(rows, &0x4841)?;
+        let checksum = get_header_bytes(rows, &0x4353)?;
+        // TODO: extract the directory index value
+        Ok(Self {
+            metadata,
+            directory: None,
+            original_len,
+            compressed_len,
+            comp_algo,
+            hash_algo,
+            checksum,
+        })
     }
 
     ///
