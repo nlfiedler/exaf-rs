@@ -1,16 +1,17 @@
-* New pack file format
-** an archiver/compressor
+* Objectives
+** define a flexible, extensible archiver format
+** implement an archiver/compressor
 ** support strong encryption
-** avoid mistakes of legacy formats
+** avoid mistakes of existing formats
 * Features
-** published both as a library and an executable binary
-** follows symlinks or not, depending on options
-** preserves ownership and permissions, or not to conserve space
-** saves all available directory and file metadata
-** strong encryption using a password and random salt
-** extensible format for archive and entry headers
-** encrypted packs cannot have their contents listed
-** should be efficient for small chunks of data
+** publish both as a library and an executable binary
+** follow symlinks or not, depending on options
+** preserve ownership and permissions, or not to conserve space
+** save all available directory and file metadata
+** use strong encryption with a password and random salt
+** format for archive and entry headers is flexible and extensible
+** metadata of encrypted packs is itself encrypted
+** will store small chunks of data efficiently
 ** each file may be optionally compressed
 ** handle any number of files of any size
 ** support different hash digests for data verification
@@ -19,7 +20,7 @@
 ** support different compression algorithms
 * Format
 ** Considerations
-*** future-proof, extensible format supporting optional fields of various lengths
+*** flexible, extensible format supporting optional fields of various lengths
 *** records various metadata about files and directories if available from OS
 *** records whether file data is Big Endian or Little Endian
 *** fields are always network byte order (Big Endian)
@@ -27,7 +28,8 @@
 *** textual data is UTF-8 encoded
 *** XML is flexible, supports complex data types
 *** JSON is smaller than XML, easy to parse
-*** EXIF style is very compact (rows of tuples consisting of tag, size, value)
+*** EXIF style is compact (rows of tuples consisting of tag, size, value)
+*** CBOR is very compact but very dependent on finding good implementations
 ** Encrytion
 *** password is used to derive a key using one of various algorithms, typically with a salt
 *** derived key (aka secret) is used to perform symmetric-key encryption on the file data
@@ -70,14 +72,14 @@
 **** length of the field will be either 4 (32 bits) or 8 (64 bits)
 *** integer values will be serialized to the smallest number of bytes necessary
 **** e.g. values below 256 will be written as 1 byte
-*** each entry consists of two or three blocks of data
-| Name         | Size | Purpose                              |
-|--------------+------+--------------------------------------|
-| Header size  | 2    | length of the header in bytes        |
-| Header value | N    | header table rows as described below |
-| File data    | M    | files only: compressed data          |
-*** header rows consist of 2 + 2 + N bytes (tag, size, value)
-*** entry with row tag of =ID= is a directory while one with =DI= is a file
+*** each file and directory entry will consist several parts
+| Name        | Size | Purpose                                 |
+|-------------+------+-----------------------------------------|
+| Header size | 2    | length of the header in bytes           |
+| Header rows | N    | header rows as described below          |
+| File data   | M    | content of file; absent for directories |
+*** each header row consists of 2 + 2 + N bytes (tag, size, value)
+*** entry with row tag of =ID= is a directory while one with =SZ= is a file
 *** field values will never be longer than 64 KB
 | Name  | Size | Purpose                       |
 |-------+------+-------------------------------|
@@ -86,11 +88,13 @@
 | Value |    N | field value                   |
 ** Archive entry representing a directory
 *** codifies each unique path as a numeric value for efficiency
+*** file entries will refer to the containing directory by its identifier
 *** fields
 | Name  | Purpose                             | Required? | Tag  | Size   |
 |-------+-------------------------------------+-----------+------+--------|
 | id    | Unique identifier                   | yes       | 'ID' | 4      |
-| path  | path value as UTF-8                 | yes       | 'PA' | vary   |
+| name  | name of directory                   | yes       | 'NM' | vary   |
+| path  | parent path as UTF-8                |           | 'PA' | vary   |
 | mode  | Unix mode                           |           | 'MO' | 2      |
 | attrs | Windows file attributes             |           | 'FA' | 4      |
 | mtime | modification date/time as Unix time |           | 'MT' | 4 or 8 |
@@ -116,7 +120,7 @@
 *** fields
 | Name     | Purpose                             | Required? | Tag  | Size    |
 |----------+-------------------------------------+-----------+------+---------|
-| name     | name of file or directory           | yes       | 'NM' | vary    |
+| name     | name of file                        | yes       | 'NM' | vary    |
 | origlen  | byte size of original data          | yes       | 'SZ' | 1,2,4,8 |
 | mode     | Unix mode (assumed to be 16 bits)   |           | 'MO' | 2       |
 | attrs    | Windows file attributes             |           | 'FA' | 4       |
@@ -149,7 +153,7 @@
 | 'UI' |    2 |                                        501 |
 | 'GN' |    5 |                                      staff |
 | 'GI' |    2 |                                         20 |
-** Custom format versus CBOR
+** Custom format compared to CBOR
 *** custom type header size for =LICENSE= example: 154 bytes (macos)
 *** CBOR header size for =LICENSE= example: 147 bytes (macos)
 *** CBOR serializer writes the byte vector as an array of individual bytes
@@ -186,31 +190,10 @@
 └────────┴─────────────────────────┴─────────────────────────┴────────┴────────┘
 #+end_src
 ** XAR-style table-of-contents vs tar-style header/data pairs
-*** XAR seems hugely complex to both generate the TOC as well as add an additional file later
+*** XAR seems hugely complex to both generate the TOC; file additions would also be cumbersome
 *** TAR style would mean recording file tree structure as separate records in-line with files
 *** TAR style allows for very easy addition of new files, simply append new header/file pairs
 * Action Plan
-** Proof of Concept
-*** write some code to get started, creating a =pack= and =unpack= binary
-*** focus on making it work rather than a great design and unit tests
-*** action plan
-**** DONE pack a single file w/o compression
-**** DONE add file metadata
-**** DONE add checksum field
-**** DONE add compression
-**** DONE print the archive contents
-**** TODO add directory entries to the archive
-**** TODO recurse a directory
-**** TODO add an additional file to an existing archive
-**** DONE determine lower bound for compressing files
-***** =xz= no good for anything less than ~300~ characters
-***** =bzip2= no good for anything less than ~180~ characters
-***** =gzip= no good for anything less than ~150~ characters
-***** =zstd= no good for anything less than ~120~ characters
-**** TODO do not compress files if less than ~256~ bytes
-**** TODO extract one particular file from an archive
-**** DONE test on Windows
-**** TODO add encryption
 ** develop specification
 *** determine the byte format and what makes the most sense
 *** write the specification as a separate document
@@ -222,7 +205,7 @@
 *** use a snapshot of the Linux source tree, compare to Pack (see issue #4)
 ** additional features
 *** list contents of an archive
-*** record symbolic links
+*** record symbolic links as-is
 *** follow symbolic links
 *** record extended attributes
 *** file/directory exclusion patterns on archive
@@ -232,10 +215,10 @@
 *** "delete" files from an archive by making them disappear? zip does this
 *** ignore absolute path prefix when extracting archives
 ** library
-*** allow many of the dependencies to be optional (e.g. zstandard)
+*** try to allow dependencies to be optional when possible
 *** read optional archive header tags into a map
 *** create a reader and writer like the =tar= crate
-*** allow for additional tag types not already in the spec
+*** ignore any unsupported tag types when reading archives
 * Questions
 ** should archive and entry headers be checksummed (md5 or sha1)?
 ** data recovery (a la error correction)? 7zip, zip lack this, RAR has it

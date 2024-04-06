@@ -1,8 +1,8 @@
-# exaf
+# Exaf
 
-The EXtensible Archiver Format to be used in compressing and archiving files. It is intended to be an alternative to the well-known zip and 7-zip formats, with extensibility in mind, as well as trying to avoid the shortfalls of said formats.
+The EXtensible Archiver Format is intended to be used in compressing and archiving files. It offers an alternative to the well-known zip and 7-zip formats, with extensibility in mind, as well as trying to avoid the shortfalls of said formats.
 
-**This is a work in progress.** Thoughts and critiques are welcome, so if after reading all of this you have any comments or criticisms, please do not hesitate to share them by filing an issue. My initial plan is to develop something that will satisfy my needs, but I am also completely open to collaborating with others to develop a suitable format. Thank you.
+**This is a work in progress.** Thoughts and critiques are welcome, so if after reading all of this you have any comments or criticisms, please do not hesitate to share them by filing an issue. My initial plan is to develop something that will satisfy my needs, but I am also completely open to collaborating with others to develop a suitable format that others can use. Thank you.
 
 ## Specification
 
@@ -16,19 +16,17 @@ A useful feature of these optional fields is to improve cross-platform support. 
 
 ## Objectives
 
-For now, complete the proof of concept by building an `exaf` binary that can pack and unpack archives with a modest amount of functionality.
-
-Eventually the purpose of this project will be to provide both format specification and a binary (`exaf`) that will pack and unpack files into and out of archives. Additionally, a [Rust](https://www.rust-lang.org) library with an interface similar to that of the [tar crate](https://docs.rs/tar/latest/tar/) will be published.
+For now, the first objective is to complete the proof of concept by building an `exaf` binary that can pack and unpack archives, offering a modest amount of functionality. Eventually the purpose of this project will be to provide a binary (`exaf`) that will pack and unpack files into and out of archives, as well as a [Rust](https://www.rust-lang.org) library with an interface similar to that of the [tar crate](https://docs.rs/tar/latest/tar/).
 
 Features will ultimately include the following:
 
 * Versioned format specification that dictates what features are required for compliant implementations.
-* Archiving many files and their directory structure, with optional metadata.
+* Binary and crate for archiving many files and their directory structure, with optional metadata.
 * Compression that is not limited to one particular algorithm.
 * Optional file checksums for data integrity validation.
 * Optional encryption of both file data as well as the entry metadata.
 * API for packing arbitrary data, not just files stored on disk.
-* Extensibility first and foremost to promote a future-proof design.
+* Flexibility and extensibility of the format to promote a future-proof design.
 
 ## Build and Run
 

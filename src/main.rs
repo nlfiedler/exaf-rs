@@ -4,7 +4,7 @@
 use chrono::prelude::*;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -29,6 +29,9 @@ pub enum Error {
     /// Version of EXAF not currently supported by this crate.
     #[error("unsupported EXAF version")]
     UnsupportedVersion,
+    /// Encountered and entry header that was not recognized.
+    #[error("unsupported header format")]
+    UnsupportedHeader,
     /// Compression algorithm in archive is not supported.
     #[error("unsupported compression algorithm {0}")]
     UnsupportedCompAlgo(String),
@@ -308,13 +311,12 @@ impl EntryMetadata {
 ///
 /// A `FileEntry` represents a file in the archive.
 ///
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct FileEntry {
     /// Metadata originally gathered from the file system.
     metadata: EntryMetadata,
     /// Identifier of directory in which this file resides.
-    // directory: Option<u32>,
+    directory: Option<u32>,
     /// Original byte size of the file.
     original_len: u64,
     /// Compressed byte size of the file data in the archive.
@@ -331,7 +333,7 @@ impl FileEntry {
     ///
     /// Create an instance of `FileEntry` based on the given path.
     ///
-    pub fn new<P: AsRef<Path>>(path: P) -> Self {
+    pub fn new<P: AsRef<Path>>(path: P, directory: Option<u32>) -> Self {
         let metadata = EntryMetadata::new(path.as_ref());
         let md = fs::symlink_metadata(path.as_ref());
         let original_len = match md.as_ref() {
@@ -340,7 +342,7 @@ impl FileEntry {
         };
         Self {
             metadata,
-            // directory: None,
+            directory,
             original_len,
             compressed_len: None,
             comp_algo: None,
@@ -356,14 +358,14 @@ impl FileEntry {
         let metadata = EntryMetadata::from_map(&rows)?;
         let original_len =
             get_header_u64(rows, &0x535a)?.ok_or_else(|| Error::MissingTag("SZ".into()))?;
+        let directory = get_header_u32(rows, &0x4449)?;
         let compressed_len = get_header_u64(rows, &0x4c4e)?;
         let comp_algo = get_header_str(rows, &0x4341)?;
         let hash_algo = get_header_str(rows, &0x4841)?;
         let checksum = get_header_bytes(rows, &0x4353)?;
-        // TODO: extract the directory index value
         Ok(Self {
             metadata,
-            // directory: None,
+            directory,
             original_len,
             compressed_len,
             comp_algo,
@@ -388,11 +390,151 @@ impl FileEntry {
     }
 }
 
+///
+/// A `DirectoryEntry` represents a directory within the archive.
+///
+#[derive(Clone, Debug)]
+pub struct DirectoryEntry {
+    /// Metadata originally gathered from the file system.
+    metadata: EntryMetadata,
+    /// Unique identifier that may be assigned to files in the archive.
+    identifier: u32,
+    /// Leading path to this directory.
+    parent_path: Option<String>,
+}
+
+impl DirectoryEntry {
+    ///
+    /// Create an instance of `DirectoryEntry` based on the given path.
+    ///
+    pub fn new<P: AsRef<Path>>(path: P, identifier: u32) -> Self {
+        let metadata = EntryMetadata::new(path.as_ref());
+        let parent_path = path
+            .as_ref()
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned());
+        Self {
+            metadata,
+            identifier,
+            parent_path,
+        }
+    }
+
+    ///
+    /// Construct a directory entry from the map of tags and values.
+    ///
+    pub fn from_map(rows: &HashMap<u16, Vec<u8>>) -> Result<Self, Error> {
+        let metadata = EntryMetadata::from_map(&rows)?;
+        let identifier =
+            get_header_u32(rows, &0x4944)?.ok_or_else(|| Error::MissingTag("ID".into()))?;
+        let parent_path = get_header_str(rows, &0x5041)?;
+        Ok(Self {
+            metadata,
+            identifier,
+            parent_path,
+        })
+    }
+}
+
 fn write_archive_header<W: Write>(mut output: W) -> io::Result<()> {
     // TODO: write the version and remaining header size using BE
     let version = [b'E', b'X', b'A', b'F', 1, 0, 0, 0];
     output.write_all(&version)?;
     Ok(())
+}
+
+fn make_dir_header(dir_entry: &DirectoryEntry) -> io::Result<Vec<u8>> {
+    let mut header: Vec<u8> = Vec::new();
+
+    // ID: unique identifier
+    header.write_all(&[b'I', b'D', 0, 4])?;
+    let dir_id = u32::to_be_bytes(dir_entry.identifier);
+    header.write_all(&dir_id)?;
+
+    // NM: file name
+    header.write_all(&[b'N', b'M'])?;
+    let name = dir_entry.metadata.name.as_bytes();
+    let name_len = u16::to_be_bytes(name.len() as u16);
+    header.write_all(&name_len)?;
+    header.write_all(name)?;
+
+    // PA: parent path, if available
+    if let Some(ref parent) = dir_entry.parent_path {
+        let path = PathBuf::from(parent).to_string_lossy().into_owned();
+        let path_bytes = path.as_bytes();
+        header.write_all(&[b'P', b'A'])?;
+        let path_len = u16::to_be_bytes(path_bytes.len() as u16);
+        header.write_all(&path_len)?;
+        header.write_all(path_bytes)?;
+    }
+
+    // MO: Unix file mode, if available
+    if let Some(mode) = dir_entry.metadata.mode {
+        header.write_all(&[b'M', b'O', 0, 2])?;
+        let unix_mode = u16::to_be_bytes(mode);
+        header.write_all(&unix_mode)?;
+    }
+
+    // FA: Windows file attributes, if available
+    if let Some(attrs) = dir_entry.metadata.attrs {
+        header.write_all(&[b'F', b'A', 0, 4])?;
+        let file_attrs = u32::to_be_bytes(attrs);
+        header.write_all(&file_attrs)?;
+    }
+
+    // MT: modified time, if available
+    if let Some(mt) = dir_entry.metadata.mtime {
+        header.write_all(&[b'M', b'T', 0, 8])?;
+        let unix_time = i64::to_be_bytes(mt.timestamp());
+        header.write_all(&unix_time)?;
+    }
+
+    // CT: creation time, if available
+    if let Some(ct) = dir_entry.metadata.ctime {
+        header.write_all(&[b'C', b'T', 0, 8])?;
+        let unix_time = i64::to_be_bytes(ct.timestamp());
+        header.write_all(&unix_time)?;
+    }
+
+    // AT: last accessed time, if available
+    if let Some(at) = dir_entry.metadata.atime {
+        header.write_all(&[b'A', b'T', 0, 8])?;
+        let unix_time = i64::to_be_bytes(at.timestamp());
+        header.write_all(&unix_time)?;
+    }
+
+    // TODO: write XA
+
+    // UN: user name, if available
+    if let Some(ref username) = dir_entry.metadata.user {
+        header.write_all(&[b'U', b'N'])?;
+        let name_len = u16::to_be_bytes(username.len() as u16);
+        header.write_all(&name_len)?;
+        header.write_all(username.as_bytes())?;
+    }
+
+    // GN: group name, if available
+    if let Some(ref groupname) = dir_entry.metadata.group {
+        header.write_all(&[b'G', b'N'])?;
+        let name_len = u16::to_be_bytes(groupname.len() as u16);
+        header.write_all(&name_len)?;
+        header.write_all(groupname.as_bytes())?;
+    }
+
+    // UI: user identifier, if available
+    if let Some(uid) = dir_entry.metadata.uid {
+        header.write_all(&[b'U', b'I', 0, 4])?;
+        let uid_be = u32::to_be_bytes(uid);
+        header.write_all(&uid_be)?;
+    }
+
+    // GI: group identifier, if available
+    if let Some(gid) = dir_entry.metadata.gid {
+        header.write_all(&[b'G', b'I', 0, 4])?;
+        let gid_be = u32::to_be_bytes(gid);
+        header.write_all(&gid_be)?;
+    }
+    Ok(header)
 }
 
 fn make_file_header(file_entry: &FileEntry) -> io::Result<Vec<u8>> {
@@ -401,8 +543,7 @@ fn make_file_header(file_entry: &FileEntry) -> io::Result<Vec<u8>> {
 
     // NM: file name
     header.write_all(&[b'N', b'M'])?;
-    let meta = &file_entry.metadata;
-    let name = meta.name.as_bytes();
+    let name = file_entry.metadata.name.as_bytes();
     let name_len = u16::to_be_bytes(name.len() as u16);
     header.write_all(&name_len)?;
     header.write_all(name)?;
@@ -441,7 +582,12 @@ fn make_file_header(file_entry: &FileEntry) -> io::Result<Vec<u8>> {
         header.write_all(checksum.as_slice())?;
     }
 
-    // TODO: write DI
+    // DI: directory identifier, if available
+    if let Some(di) = file_entry.directory {
+        header.write_all(&[b'D', b'I', 0, 4])?;
+        let dir_id = u32::to_be_bytes(di);
+        header.write_all(&dir_id)?;
+    }
 
     // MT: modified time, if available
     if let Some(mt) = file_entry.metadata.mtime {
@@ -498,7 +644,7 @@ fn make_file_header(file_entry: &FileEntry) -> io::Result<Vec<u8>> {
     Ok(header)
 }
 
-fn write_file_header<W: Write>(header: &[u8], mut output: W) -> io::Result<()> {
+fn write_entry_header<W: Write>(header: &[u8], mut output: W) -> io::Result<()> {
     // write the fully realized header to the output
     let header_len = u16::to_be_bytes(header.len() as u16);
     output.write_all(&header_len)?;
@@ -506,49 +652,71 @@ fn write_file_header<W: Write>(header: &[u8], mut output: W) -> io::Result<()> {
     Ok(())
 }
 
-fn add_file<P: AsRef<Path>, W: Write + Seek>(infile: P, mut output: W) -> io::Result<()> {
-    let mut file_entry = FileEntry::new(infile.as_ref());
+fn add_file<P: AsRef<Path>, W: Write + Seek>(
+    infile: P,
+    mut output: W,
+    di: Option<u32>,
+) -> io::Result<()> {
+    let mut file_entry = FileEntry::new(infile.as_ref(), di);
     file_entry = file_entry.compute_sha1(infile.as_ref())?;
     let mut header = make_file_header(&file_entry)?;
-    //
-    // when compressing the file...
-    //
-    // 1. add CA row to header
-    // 2. get the current position in the output as p1
-    // 3. write (2 + header.len() + 12) of zeros
-    // 4. get the current position in the output as p15
-    // 5. write the compressed file data
-    // 6. remember this current position as p2
-    // 7. seek back to p1
-    // 8. add the LN field to the header with length equal to p2 - p15
-    // 9. write the completed header data starting at p1
-    // 10. seek back to p2 for the next invocation
-    //
-    header.write_all(&[b'C', b'A', 0, 4, b'z', b's', b't', b'd'])?;
-    let p1 = output.stream_position()?;
-    // header-size field (2 bytes) + header length + upcoming LN row
-    let header_len = 2 + header.len() + 12;
-    let mut zeros: Vec<u8> = Vec::with_capacity(header_len);
-    zeros.resize(header_len, 0);
-    output.write_all(&zeros)?;
-    let p15 = output.stream_position()?;
-    let input = File::open(infile)?;
-    zstd::stream::copy_encode(input, &mut output, 0)?;
-    let p2 = output.stream_position()?;
-    output.seek(SeekFrom::Start(p1))?;
-    header.write_all(&[b'L', b'N', 0, 8])?;
-    let data_len = u64::to_be_bytes(p2 - p15);
-    header.write_all(&data_len)?;
-    write_file_header(&header, &mut output)?;
-    output.seek(SeekFrom::Start(p2))?;
-
-    //
-    // TODO: if not compressing, then write file header and copy file
-    //
-    // write_file_header(&header, &mut output)?;
-    // let mut input = File::open(infile)?;
-    // io::copy(&mut input, &mut output)?;
+    // very small files often get larger when passed through a compressor
+    if file_entry.original_len > 256 {
+        // Write out the appropriate number of zeros to advance the file pointer
+        // to where the compressed data should be written, then back up and fill
+        // in the finalized header data, then finally advance to the end.
+        header.write_all(&[b'C', b'A', 0, 4, b'z', b's', b't', b'd'])?;
+        let p1 = output.stream_position()?;
+        // header-size field (2 bytes) + header length + upcoming LN row
+        let header_len = 2 + header.len() + 12;
+        let mut zeros: Vec<u8> = Vec::with_capacity(header_len);
+        zeros.resize(header_len, 0);
+        output.write_all(&zeros)?;
+        let p15 = output.stream_position()?;
+        let input = File::open(infile)?;
+        zstd::stream::copy_encode(input, &mut output, 0)?;
+        let p2 = output.stream_position()?;
+        output.seek(SeekFrom::Start(p1))?;
+        header.write_all(&[b'L', b'N', 0, 8])?;
+        let data_len = u64::to_be_bytes(p2 - p15);
+        header.write_all(&data_len)?;
+        write_entry_header(&header, &mut output)?;
+        output.seek(SeekFrom::Start(p2))?;
+    } else {
+        // If not compressing, then simply write the file header and copy the
+        // file contents as-is to the output stream.
+        write_entry_header(&header, &mut output)?;
+        let mut input = File::open(infile)?;
+        io::copy(&mut input, &mut output)?;
+    }
     Ok(())
+}
+
+fn scan_tree<W: Write + Seek>(basepath: &Path, mut output: W, mut di: u32) -> Result<u64, Error> {
+    let mut file_count: u64 = 0;
+    let mut subdirs: Vec<PathBuf> = Vec::new();
+    subdirs.push(basepath.to_path_buf());
+    while let Some(currdir) = subdirs.pop() {
+        // add directory entry to archive for this current path
+        di += 1;
+        let dir_entry = DirectoryEntry::new(&currdir, di);
+        let header = make_dir_header(&dir_entry)?;
+        write_entry_header(&header, &mut output)?;
+        let readdir = fs::read_dir(currdir)?;
+        for entry_result in readdir {
+            let entry = entry_result?;
+            let path = entry.path();
+            // DirEntry.metadata() does not follow symlinks and that is good
+            let metadata = entry.metadata()?;
+            if metadata.is_dir() {
+                subdirs.push(path);
+            } else if metadata.is_file() {
+                add_file(path, &mut output, Some(di))?;
+                file_count += 1;
+            }
+        }
+    }
+    Ok(file_count)
 }
 
 fn read_archive_header<P: AsRef<Path>>(infile: P) -> Result<File, Error> {
@@ -568,60 +736,80 @@ fn read_archive_header<P: AsRef<Path>>(infile: P) -> Result<File, Error> {
     Ok(input)
 }
 
-fn list_files<R: Read + Seek>(mut input: R) -> Result<(), Error> {
-    // read next 2 bytes as header size
-    let mut header_size = [0; 2];
-    input.read_exact(&mut header_size)?;
-    let size = u16::from_be_bytes(header_size);
-    // read those number of bytes as a header
-    let mut header: Vec<u8> = Vec::new();
-    let mut chunk = input.take(size as u64);
-    let n = chunk.read_to_end(&mut header)?;
-    if n != size as usize {
-        return Err(Error::UnexpectedEof);
-    }
-    // parse header rows into a HashMap
-    let mut rows: HashMap<u16, Vec<u8>> = HashMap::new();
-    let mut index: usize = 0;
-    while index < header.len() {
-        let tag = u16::from_be_bytes([header[index], header[index + 1]]);
-        let len = u16::from_be_bytes([header[index + 2], header[index + 3]]) as usize;
-        let value: Vec<u8> = Vec::from(&header[index + 4..index + 4 + len]);
-        rows.insert(tag, value);
-        index += 4 + len;
-    }
-    // create a FileEntry from the supported tags in the HashMap
-    let entry = FileEntry::from_map(&rows)?;
-    println!("entry: {:?}", entry);
+fn list_entries<R: Read + Seek>(mut input: R) -> Result<(), Error> {
+    // loop until the end of the file is reached
+    loop {
+        // read next 2 bytes as header size
+        let mut header_size = [0; 2];
+        match input.read_exact(&mut header_size) {
+            Ok(()) => {
+                let size = u16::from_be_bytes(header_size);
+                // read those number of bytes as a header
+                let mut header: Vec<u8> = Vec::new();
+                let mut chunk = input.take(size as u64);
+                let n = chunk.read_to_end(&mut header)?;
+                if n != size as usize {
+                    return Err(Error::UnexpectedEof);
+                }
+                // parse header rows into a HashMap
+                let mut rows: HashMap<u16, Vec<u8>> = HashMap::new();
+                let mut index: usize = 0;
+                while index < header.len() {
+                    let tag = u16::from_be_bytes([header[index], header[index + 1]]);
+                    let len = u16::from_be_bytes([header[index + 2], header[index + 3]]) as usize;
+                    let value: Vec<u8> = Vec::from(&header[index + 4..index + 4 + len]);
+                    rows.insert(tag, value);
+                    index += 4 + len;
+                }
+                input = chunk.into_inner();
+                if rows.contains_key(&0x4944) {
+                    // create a DirectoryEntry from the supported tags in the HashMap
+                    let entry = DirectoryEntry::from_map(&rows)?;
+                    println!("directory: {:?}", entry);
+                } else if rows.contains_key(&0x535a) {
+                    // create a FileEntry from the supported tags in the HashMap
+                    let entry = FileEntry::from_map(&rows)?;
+                    println!("file: {:?}", entry);
 
-    // read the file data, decompressing as needed, print to stdout
-    input = chunk.into_inner();
-    let mut chunk = if let Some(clen) = entry.compressed_len {
-        input.take(clen)
-    } else {
-        input.take(entry.original_len)
-    };
-    if let Some(algo) = entry.comp_algo {
-        if algo == "zstd" {
-            zstd::stream::copy_decode(&mut chunk, io::stdout())?;
-        } else {
-            return Err(Error::UnsupportedCompAlgo(algo));
+                    // read the file data, decompressing as needed, print to stdout
+                    let mut chunk = if let Some(clen) = entry.compressed_len {
+                        input.take(clen)
+                    } else {
+                        input.take(entry.original_len)
+                    };
+                    if let Some(algo) = entry.comp_algo {
+                        if algo == "zstd" {
+                            zstd::stream::copy_decode(&mut chunk, io::stdout())?;
+                        } else {
+                            return Err(Error::UnsupportedCompAlgo(algo));
+                        }
+                    } else {
+                        let mut out = io::stdout();
+                        io::copy(&mut chunk, &mut out)?;
+                    }
+                    input = chunk.into_inner();
+                } else {
+                    return Err(Error::UnsupportedHeader);
+                }
+            }
+            Err(err) => {
+                if err.kind() == ErrorKind::UnexpectedEof {
+                    return Ok(());
+                }
+                return Err(Error::from(err));
+            }
         }
-    } else {
-        let mut out = io::stdout();
-        io::copy(&mut chunk, &mut out)?;
     }
-    Ok(())
 }
 
 fn main() {
-    let infile = PathBuf::from("LICENSE");
+    let inpath = Path::new("tmp");
     let mut outfile = File::create("output.exaf").expect("could not create file");
     write_archive_header(&mut outfile).expect("could not write header");
-    add_file(infile, &mut outfile).expect("could not add file");
+    scan_tree(inpath, &mut outfile, 0).expect("could not scan tree");
     println!("Archive created");
     let infile = PathBuf::from("output.exaf");
     let input = read_archive_header(&infile).expect("could not read header");
-    list_files(input).expect("could not read file");
+    list_entries(input).expect("could not read file");
     println!("Archive examined");
 }
