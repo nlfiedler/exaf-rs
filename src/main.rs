@@ -59,10 +59,10 @@ fn get_file_name<P: AsRef<Path>>(path: P) -> String {
 /// Return the Unix file mode for the given path.
 ///
 #[cfg(target_family = "unix")]
-pub fn unix_mode<P: AsRef<Path>>(path: P) -> Option<u32> {
+pub fn unix_mode<P: AsRef<Path>>(path: P) -> Option<u16> {
     use std::os::unix::fs::MetadataExt;
     if let Ok(meta) = fs::symlink_metadata(path) {
-        Some(meta.mode())
+        Some(meta.mode() as u16)
     } else {
         None
     }
@@ -95,6 +95,16 @@ fn get_header_str(rows: &HashMap<u16, Vec<u8>>, key: &u16) -> Result<Option<Stri
     if let Some(row) = rows.get(key) {
         let s = String::from_utf8(row.to_owned())?;
         Ok(Some(s))
+    } else {
+        Ok(None)
+    }
+}
+
+fn get_header_u16(rows: &HashMap<u16, Vec<u8>>, key: &u16) -> Result<Option<u16>, Error> {
+    if let Some(row) = rows.get(key) {
+        let raw: [u8; 2] = row[0..2].try_into()?;
+        let v = u16::from_be_bytes(raw);
+        Ok(Some(v))
     } else {
         Ok(None)
     }
@@ -147,7 +157,7 @@ pub struct EntryMetadata {
     /// Name of the file, directory, or symbolic link.
     pub name: String,
     /// Unix file mode of the entry.
-    pub mode: Option<u32>,
+    pub mode: Option<u16>,
     /// Windows file attributes of the entry.
     pub attrs: Option<u32>,
     /// Unix user identifier
@@ -220,7 +230,7 @@ impl EntryMetadata {
     ///
     pub fn from_map(rows: &HashMap<u16, Vec<u8>>) -> Result<Self, Error> {
         let name = get_header_str(rows, &0x4e4d)?.ok_or_else(|| Error::MissingTag("NM".into()))?;
-        let mode = get_header_u32(rows, &0x4d4f)?;
+        let mode = get_header_u16(rows, &0x4d4f)?;
         let attrs = get_header_u32(rows, &0x4641)?;
         let uid = get_header_u32(rows, &0x5549)?;
         let gid = get_header_u32(rows, &0x4749)?;
@@ -405,8 +415,8 @@ fn make_file_header(file_entry: &FileEntry) -> io::Result<Vec<u8>> {
     // MO: Unix file mode, if available
     if let Some(mode) = file_entry.metadata.mode {
         header.write_all(&[b'M', b'O', 0, 2])?;
-        let unix_mode = u32::to_be_bytes(mode);
-        header.write_all(&unix_mode[2..])?;
+        let unix_mode = u16::to_be_bytes(mode);
+        header.write_all(&unix_mode)?;
     }
 
     // FA: Windows file attributes, if available
