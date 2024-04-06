@@ -29,6 +29,9 @@ pub enum Error {
     /// Version of EXAF not currently supported by this crate.
     #[error("unsupported EXAF version")]
     UnsupportedVersion,
+    /// Compression algorithm in archive is not supported.
+    #[error("unsupported compression algorithm {0}")]
+    UnsupportedCompAlgo(String),
     /// TODO: this will go away
     #[error("unsupported header size")]
     TempUnsupportedHdrSize,
@@ -590,7 +593,24 @@ fn list_files<R: Read + Seek>(mut input: R) -> Result<(), Error> {
     // create a FileEntry from the supported tags in the HashMap
     let entry = FileEntry::from_map(&rows)?;
     println!("entry: {:?}", entry);
-    // TODO: read the file data, decompress, print
+
+    // read the file data, decompressing as needed, print to stdout
+    input = chunk.into_inner();
+    let mut chunk = if let Some(clen) = entry.compressed_len {
+        input.take(clen)
+    } else {
+        input.take(entry.original_len)
+    };
+    if let Some(algo) = entry.comp_algo {
+        if algo == "zstd" {
+            zstd::stream::copy_decode(&mut chunk, io::stdout())?;
+        } else {
+            return Err(Error::UnsupportedCompAlgo(algo));
+        }
+    } else {
+        let mut out = io::stdout();
+        io::copy(&mut chunk, &mut out)?;
+    }
     Ok(())
 }
 
