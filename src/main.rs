@@ -16,9 +16,6 @@ pub enum Error {
     IOError(#[from] std::io::Error),
     /// Error occurred decoding a UTF-8 string from bytes.
     #[error("UTF-8 error: {0}")]
-    Utf8Error(#[from] std::str::Utf8Error),
-    /// Error occurred decoding a UTF-8 string from bytes.
-    #[error("UTF-8 error: {0}")]
     FromUtf8Error(#[from] std::string::FromUtf8Error),
     /// Error occurred attempting to manipulate a slice.
     #[error("Slice error: {0}")]
@@ -176,7 +173,7 @@ pub struct EntryMetadata {
     pub atime: Option<DateTime<Utc>>,
     // Set of extended file attributes, if any. The key is the name of the
     // extended attribute, and the value raw data from the file system.
-    pub xattrs: Option<HashMap<String, Vec<u8>>>,
+    // pub xattrs: Option<HashMap<String, Vec<u8>>>,
 }
 
 impl EntryMetadata {
@@ -220,7 +217,7 @@ impl EntryMetadata {
             ctime,
             mtime,
             atime,
-            xattrs: None,
+            // xattrs: None,
         };
         em.owners(path.as_ref())
     }
@@ -251,7 +248,7 @@ impl EntryMetadata {
             ctime,
             mtime,
             atime,
-            xattrs: None,
+            // xattrs: None,
         })
     }
 
@@ -314,7 +311,7 @@ pub struct FileEntry {
     /// Metadata originally gathered from the file system.
     metadata: EntryMetadata,
     /// Identifier of directory in which this file resides.
-    directory: Option<u32>,
+    // directory: Option<u32>,
     /// Original byte size of the file.
     original_len: u64,
     /// Compressed byte size of the file data in the archive.
@@ -340,7 +337,7 @@ impl FileEntry {
         };
         Self {
             metadata,
-            directory: None,
+            // directory: None,
             original_len,
             compressed_len: None,
             comp_algo: None,
@@ -363,7 +360,7 @@ impl FileEntry {
         // TODO: extract the directory index value
         Ok(Self {
             metadata,
-            directory: None,
+            // directory: None,
             original_len,
             compressed_len,
             comp_algo,
@@ -465,10 +462,36 @@ fn make_file_header(file_entry: &FileEntry) -> io::Result<Vec<u8>> {
     }
 
     // TODO: write XA
-    // TODO: write UN
-    // TODO: write UI
-    // TODO: write GN
-    // TODO: write GI
+
+    // UN: user name, if available
+    if let Some(ref username) = file_entry.metadata.user {
+        header.write_all(&[b'U', b'N'])?;
+        let name_len = u16::to_be_bytes(username.len() as u16);
+        header.write_all(&name_len)?;
+        header.write_all(username.as_bytes())?;
+    }
+
+    // GN: group name, if available
+    if let Some(ref groupname) = file_entry.metadata.group {
+        header.write_all(&[b'G', b'N'])?;
+        let name_len = u16::to_be_bytes(groupname.len() as u16);
+        header.write_all(&name_len)?;
+        header.write_all(groupname.as_bytes())?;
+    }
+
+    // UI: user identifier, if available
+    if let Some(uid) = file_entry.metadata.uid {
+        header.write_all(&[b'U', b'I', 0, 4])?;
+        let uid_be = u32::to_be_bytes(uid);
+        header.write_all(&uid_be)?;
+    }
+
+    // GI: group identifier, if available
+    if let Some(gid) = file_entry.metadata.gid {
+        header.write_all(&[b'G', b'I', 0, 4])?;
+        let gid_be = u32::to_be_bytes(gid);
+        header.write_all(&gid_be)?;
+    }
     Ok(header)
 }
 
@@ -578,7 +601,7 @@ fn main() {
     add_file(infile, &mut outfile).expect("could not add file");
     println!("Archive created");
     let infile = PathBuf::from("output.exaf");
-    let input = read_archive_header(&infile).expect("could not write header");
-    list_files(input).expect("could not add file");
+    let input = read_archive_header(&infile).expect("could not read header");
+    list_files(input).expect("could not read file");
     println!("Archive examined");
 }

@@ -148,27 +148,47 @@
 | 'GN' |    5 |                                      staff |
 | 'GI' |    2 |                                         20 |
 ** Custom format versus CBOR
-*** CBOR is basically a standard for every kind of time
-*** custom type header size for =LICENSE= example: 117 bytes (macos)
-*** CBOR header size for =LICENSE= example: 140 bytes
-*** CBOR serializes the byte vector as 2x actual data size
+*** custom type header size for =LICENSE= example: 154 bytes (macos)
+*** CBOR header size for =LICENSE= example: 155 bytes (macos)
+*** CBOR serializer writes the byte vector as 2x actual data size
+**** neither =serde_cbor= nor =ciborium= writes =Vec<u8>= as a byte string
+**** even if =CS= were written as a byte string, length would be 136 bytes
 *** custom format example using =LICENSE=
 #+begin_src
 ┌────────┬─────────────────────────┬─────────────────────────┬────────┬────────┐
-│00000000│ 45 58 41 46 01 00 00 00 ┊ 00 75 4e 4d 00 07 4c 49 │EXAF•⋄⋄⋄┊⋄uNM⋄•LI│
+│00000000│ 45 58 41 46 01 00 00 00 ┊ 00 9a 4e 4d 00 07 4c 49 │EXAF•⋄⋄⋄┊⋄×NM⋄•LI│
 │00000010│ 43 45 4e 53 45 53 5a 00 ┊ 08 00 00 00 00 00 00 04 │CENSESZ⋄┊•⋄⋄⋄⋄⋄⋄•│
 │00000020│ 39 4d 4f 00 02 81 a4 48 ┊ 41 00 04 53 48 41 31 43 │9MO⋄•××H┊A⋄•SHA1C│
 │00000030│ 53 00 14 fa 67 91 85 a2 ┊ 49 ef e2 2d 77 49 21 af │S⋄•×g×××┊I××-wI!×│
 │00000040│ 87 3a 01 ef 09 ce 01 4d ┊ 54 00 08 00 00 00 00 66 │×:•×_×•M┊T⋄•⋄⋄⋄⋄f│
-│00000050│ 07 a4 1c 43 54 00 08 00 ┊ 00 00 00 60 54 17 8a 41 │•×•CT⋄•⋄┊⋄⋄⋄`T•×A│
-│00000060│ 54 00 08 00 00 00 00 66 ┊ 09 fd 0e 43 41 00 04 7a │T⋄•⋄⋄⋄⋄f┊_×•CA⋄•z│
-│00000070│ 73 74 64 4c 4e 00 08 00 ┊ 00 00 00 00 00 02 ab    │stdLN⋄•⋄┊⋄⋄⋄⋄⋄•× │
+│00000050│ 07 a4 1c 43 54 00 08 00 ┊ 00 00 00 66 07 a4 1c 41 │•×•CT⋄•⋄┊⋄⋄⋄f•×•A│
+│00000060│ 54 00 08 00 00 00 00 66 ┊ 10 b8 2f 55 4e 00 08 6e │T⋄•⋄⋄⋄⋄f┊•×/UN⋄•n│
+│00000070│ 66 69 65 64 6c 65 72 47 ┊ 4e 00 05 73 74 61 66 66 │fiedlerG┊N⋄•staff│
+│00000080│ 55 49 00 04 00 00 01 f5 ┊ 47 49 00 04 00 00 00 14 │UI⋄•⋄⋄•×┊GI⋄•⋄⋄⋄•│
+│00000090│ 43 41 00 04 7a 73 74 64 ┊ 4c 4e 00 08 00 00 00 00 │CA⋄•zstd┊LN⋄•⋄⋄⋄⋄│
+│000000a0│ 00 00 02 ab             ┊                         │⋄⋄•×    ┊        │
+└────────┴─────────────────────────┴─────────────────────────┴────────┴────────┘
+#+end_src
+*** CBOR format example using =LICENSE= (checksum is not a major type 2, byte string)
+#+begin_src
+┌────────┬─────────────────────────┬─────────────────────────┬────────┬────────┐
+│00000000│ 45 58 41 46 01 00 00 00 ┊ 00 9b bf 62 4e 4d 67 4c │EXAF•⋄⋄⋄┊⋄××bNMgL│
+│00000010│ 49 43 45 4e 53 45 62 4d ┊ 4f 19 81 a4 62 46 41 f6 │ICENSEbM┊O•××bFA×│
+│00000020│ 62 55 49 19 01 f5 62 55 ┊ 4e 68 6e 66 69 65 64 6c │bUI••×bU┊Nhnfiedl│
+│00000030│ 65 72 62 47 49 14 62 47 ┊ 4e 65 73 74 61 66 66 62 │erbGI•bG┊Nestaffb│
+│00000040│ 43 54 1a 60 54 17 8a 62 ┊ 4d 54 1a 66 07 a4 1c 62 │CT•`T•×b┊MT•f•×•b│
+│00000050│ 41 54 1a 66 09 fd 0e 62 ┊ 58 41 f6 62 44 49 f6 62 │AT•f_×•b┊XA×bDI×b│
+│00000060│ 53 5a 19 04 39 62 4c 4e ┊ 19 02 ab 62 43 41 64 7a │SZ••9bLN┊••×bCAdz│
+│00000070│ 73 74 64 62 48 41 64 53 ┊ 48 41 31 62 43 53 94 18 │stdbHAdS┊HA1bCS×•│
+│00000080│ fa 18 67 18 91 18 85 18 ┊ a2 18 49 18 ef 18 e2 18 │×•g•×•×•┊×•I•×•×•│
+│00000090│ 2d 18 77 18 49 18 21 18 ┊ af 18 87 18 3a 01 18 ef │-•w•I•!•┊×•×•:••×│
+│000000a0│ 09 18 ce 01 ff          ┊                         │_•×•×   ┊        │
+└────────┴─────────────────────────┴─────────────────────────┴────────┴────────┘
 #+end_src
 ** XAR-style table-of-contents vs tar-style header/data pairs
 *** XAR seems hugely complex to both generate the TOC as well as add an additional file later
-*** TAR style means recording file tree structure is more difficult, probably
-**** could simply encode the directories again, before the new file
-*** TAR style allows for very easy addition of new files
+*** TAR style would mean recording file tree structure as separate records in-line with files
+*** TAR style allows for very easy addition of new files, simply append new header/file pairs
 * Action Plan
 ** Proof of Concept
 *** write some code to get started, creating a =pack= and =unpack= binary
@@ -178,11 +198,16 @@
 **** DONE add file metadata
 **** DONE add checksum field
 **** DONE add compression
-**** TODO unpack the file
+**** TODO unpack the file contents
 **** TODO add directory entries to the archive
 **** TODO recurse a directory
 **** TODO add an additional file to an existing archive
-**** TODO determine lower bound for compressing files (below a certain size it won't help)
+**** DONE determine lower bound for compressing files
+***** =xz= no good for anything less than ~300~ characters
+***** =bzip2= no good for anything less than ~180~ characters
+***** =gzip= no good for anything less than ~150~ characters
+***** =zstd= no good for anything less than ~120~ characters
+**** TODO do not compress files with ~zstd~ if less than ~120~ bytes
 **** TODO extract one particular file from an archive
 **** DONE test on Windows
 **** TODO add encryption
@@ -202,7 +227,10 @@
 *** record extended attributes
 *** file/directory exclusion patterns on archive
 *** file/directory exclusion patterns on extract
+*** recognize certain kinds of (lossy) files that would not compress well and do not compress them
+**** nearly all common image formats would not compress well
 *** "delete" files from an archive by making them disappear? zip does this
+*** ignore absolute path prefix when extracting archives
 ** library
 *** allow many of the dependencies to be optional (e.g. zstandard)
 *** read optional archive header tags into a map
