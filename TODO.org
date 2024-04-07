@@ -34,6 +34,11 @@
 *** password is used to derive a key using one of various algorithms, typically with a salt
 *** derived key (aka secret) is used to perform symmetric-key encryption on the file data
 *** directory/file header data rows are encrypted to prevent listing of archive contents
+** Archive components
+*** the major parts of the archive are in this order
+1. archive header
+2. directory (header only) and file (header/data pair) entries
+3. compression dictionary, if any
 ** Archive header
 *** header size limited to 64 KB
 *** EXIF style entries after the initial version-specific rows
@@ -42,9 +47,10 @@
 |      0 |    4 | File signature ('EXAF')        |
 |      4 |    2 | format version (major/minor)   |
 |      6 |    2 | remaining header size in bytes |
-|      8 |    2 | optional field tag             |
-|     10 |    2 | optional field size in bytes   |
-|     12 |    n | optional field value           |
+|      8 |    8 | dictionary offset; 0 if none   |
+|     16 |    2 | optional field tag             |
+|     18 |    2 | optional field size in bytes   |
+|     20 |    n | optional field value           |
 |    ... |  ... | ...                            |
 *** optional fields
 | Name    | Purpose                                   | Tag  |
@@ -126,8 +132,8 @@
 | attrs    | Windows file attributes             |           | 'FA' | 4       |
 | dirid    | directory identifier                |           | 'DI' | 4       |
 | complen  | byte size of compressed data        |           | 'LN' | 1,2,4,8 |
-| compalgo | compression algorithm               |           | 'CA' | 4       |
-| hashalgo | hash digest algorithm               |           | 'HA' | 4       |
+| compalgo | compression algorithm               |           | 'CA' | vary    |
+| hashalgo | hash digest algorithm               |           | 'HA' | vary    |
 | checksum | hash digest of original data        |           | 'CS' | vary    |
 | mtime    | modification date/time as Unix time |           | 'MT' | 4 or 8  |
 | ctime    | creation date/time as Unix time     |           | 'CT' | 4 or 8  |
@@ -194,6 +200,54 @@
 *** TAR style would mean recording file tree structure as separate records in-line with files
 *** TAR style allows for very easy addition of new files, simply append new header/file pairs
 * Action Plan
+** comparison with other archivers
+*** using httpd 2.4.59 source tree (42,225,957 ~apparent~ size according to =du=)
+| archiver               | output size |
+|------------------------+-------------|
+| exaf w/metadata        |    13109158 |
+| exaf w/o metdata       |    12745782 |
+| exaf no meta, 16k dict |     2048663 |
+| exaf no meta, 8k dict  |     2052323 |
+| exaf no meta, 4k dict  |     2062695 |
+| exaf no meta, 2k dict  |     2083583 |
+| zip                    |    12514363 |
+| pack-2                 |     8691712 |
+| tar.bz2                |     7503198 |
+| 7-zip                  |     6455217 |
+*** disk usage of ~httpd~ is 49 MB with 3138 files; 7-zip reports total size as 42,225,957
+*** seems that 7-zip can use a large dictionary across many files to yield better compression
+*** n.b. compressed tar is _not_ random access so only good for full backup/restore
+** consider ways of decreasing compression time and file size
+*** TODO try different compression levels (default is 3, try 7)
+*** DONE use dictionary in =zstd::dict= with several input files to train
+**** DONE peruse file tree to collect >100 (small) files
+**** DONE total sample file size should be 100x target dictionary size
+**** DONE scan entire data set, compute total size, use that to size dictionary and sample set
+**** DONE experiment with different dictionary sizes
+**** DONE write the dictionary at the end of the archive
+**** DONE archive header will have offset of dictionary
+**** adding new files would read dict, write new content over existing dict, write updated dict, update header
+*** evaluation of ~pack~
+**** pack is very fast and significantly smaller than zip (but bigger than tar.bz2 and .7z)
+**** does not store any file metadata (times, ownership, permissions)
+**** pack file is literally an SQLite database with a custom magic number
+**** appears to spawn threads to process multiple files concurrently
+**** splits files into chunks rather than storing in their entirety
+**** each file (or its parts, if split) is added to a queue
+**** queue of files/parts is processed concurrently on multiple threads
+**** does not appear to use a shared zstandard dictionary
+**** appears to compress files if over 4 KB in size
+**** compares compressed size to original size and keeps whichever is smaller
+**** defines several tables
+***** =Item= is an individual file
+***** =Content= is an individual part of a file
+***** =ItemContent= is the list of parts (=Content=) for each file (=Item=)
+- Item: ID INTEGER PRIMARY KEY, Parent INTEGER, Kind INTEGER, Name TEXT
+- Content: ID INTEGER PRIMARY KEY, Value BLOB
+- ItemContent: ID INTEGER PRIMARY KEY, Item INTEGER, ItemPosition INTEGER, Content INTEGER, ContentPosition INTEGER, Size INTEGER
+*** using zstandard and sqlite like pack does
+**** crate =rusqlite= seems good, has =chrono= support and many others
+**** storing a single record with 3 fields uses 8 KB on disk
 ** develop specification
 *** determine the byte format and what makes the most sense
 *** write the specification as a separate document
