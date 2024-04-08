@@ -201,32 +201,19 @@
 *** TAR style allows for very easy addition of new files, simply append new header/file pairs
 * Action Plan
 ** comparison with other archivers
-*** using httpd 2.4.59 source tree (42,225,957 ~apparent~ size according to =du=)
-| archiver               | output size |
-|------------------------+-------------|
-| exaf w/metadata        |    13109158 |
-| exaf w/o metdata       |    12745782 |
-| exaf no meta, 16k dict |     2048663 |
-| exaf no meta, 8k dict  |     2052323 |
-| exaf no meta, 4k dict  |     2062695 |
-| exaf no meta, 2k dict  |     2083583 |
-| zip                    |    12514363 |
-| pack-2                 |     8691712 |
-| tar.bz2                |     7503198 |
-| 7-zip                  |     6455217 |
-*** disk usage of ~httpd~ is 49 MB with 3138 files; 7-zip reports total size as 42,225,957
-*** seems that 7-zip can use a large dictionary across many files to yield better compression
-*** n.b. compressed tar is _not_ random access so only good for full backup/restore
+*** using httpd 2.4.59 source tree (3,138 files, 42,225,957 bytes)
+| archiver                       | output size |
+|--------------------------------+-------------|
+| exaf w/metadata                |    13109158 |
+| exaf w/o metdata               |    12745782 |
+| zip                            |    12514363 |
+| exaf w/meta, 16k dict          |    12386265 |
+| exaf no meta, 16k dict         |    12026176 |
+| exaf w/meta, level 7, 16k dict |    11540062 |
+| pack-2                         |     8691712 |
+| tar.bz2                        |     7503198 |
+| 7-zip                          |     6455217 |
 ** consider ways of decreasing compression time and file size
-*** TODO try different compression levels (default is 3, try 7)
-*** DONE use dictionary in =zstd::dict= with several input files to train
-**** DONE peruse file tree to collect >100 (small) files
-**** DONE total sample file size should be 100x target dictionary size
-**** DONE scan entire data set, compute total size, use that to size dictionary and sample set
-**** DONE experiment with different dictionary sizes
-**** DONE write the dictionary at the end of the archive
-**** DONE archive header will have offset of dictionary
-**** adding new files would read dict, write new content over existing dict, write updated dict, update header
 *** evaluation of ~pack~
 **** pack is very fast and significantly smaller than zip (but bigger than tar.bz2 and .7z)
 **** does not store any file metadata (times, ownership, permissions)
@@ -254,20 +241,30 @@
 *** draw diagrams to help visualize the byte layout
 *** provide guidance and examples for implementation
 ** test and benchmark
-*** test with a real-life directory structure consisting only of zero-length files
-**** idea is to measure overhead without any file content
 *** use a snapshot of the Linux source tree, compare to Pack (see issue #4)
 ** additional features
-*** list contents of an archive
-*** record symbolic links as-is
-*** follow symbolic links
-*** record extended attributes
-*** file/directory exclusion patterns on archive
-*** file/directory exclusion patterns on extract
-*** recognize certain kinds of (lossy) files that would not compress well and do not compress them
+*** TODO zstandard dictionary offset should be an optional field in archive header
+**** since each file can be compressed with different algorithms, need to allow for multiple dictionaries
+**** need to keep track of offset within file and size of dictionary to accommodate multiple dictionaries
+*** TODO list contents of an archive
+*** TODO record symbolic links as-is
+*** TODO follow symbolic links
+*** TODO record extended attributes
+*** TODO file/directory exclusion patterns on archive
+*** TODO file/directory exclusion patterns on extract
+*** TODO recognize certain kinds of (lossy) files that would not compress well and do not compress them
 **** nearly all common image formats would not compress well
 *** "delete" files from an archive by making them disappear? zip does this
 *** ignore absolute path prefix when extracting archives
+** binary
+*** TODO try different compression levels (default is 3, try 7)
+*** TODO parameter for dictating dictionary size
+*** TODO parameter for setting the compression level
+*** TODO parameter for turning off compression
+*** TODO parameter to follow symlinks (versus recording their contents)
+*** TODO parameter to ignore file system metadata (owners, permissions, xattrs)
+*** TODO parameter to exclude certain patterns
+*** TODO parameter to include only certain patterns
 ** library
 *** try to allow dependencies to be optional when possible
 *** read optional archive header tags into a map

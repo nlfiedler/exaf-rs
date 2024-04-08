@@ -4,7 +4,7 @@
 use chrono::prelude::*;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -311,6 +311,7 @@ impl EntryMetadata {
 ///
 /// A `FileEntry` represents a file in the archive.
 ///
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct FileEntry {
     /// Metadata originally gathered from the file system.
@@ -438,7 +439,7 @@ impl DirectoryEntry {
 
 fn write_archive_header<W: Write>(mut output: W) -> io::Result<()> {
     // TODO: write the version and remaining header size using BE
-    let version = [b'E', b'X', b'A', b'F', 1, 0, 0, 0];
+    let version = [b'E', b'X', b'A', b'F', 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     output.write_all(&version)?;
     Ok(())
 }
@@ -656,6 +657,7 @@ fn add_file<P: AsRef<Path>, W: Write + Seek>(
     infile: P,
     mut output: W,
     di: Option<u32>,
+    dict: &Vec<u8>,
 ) -> io::Result<()> {
     let mut file_entry = FileEntry::new(infile.as_ref(), di);
     file_entry = file_entry.compute_sha1(infile.as_ref())?;
@@ -673,8 +675,17 @@ fn add_file<P: AsRef<Path>, W: Write + Seek>(
         zeros.resize(header_len, 0);
         output.write_all(&zeros)?;
         let p15 = output.stream_position()?;
-        let input = File::open(infile)?;
-        zstd::stream::copy_encode(input, &mut output, 0)?;
+        if dict.is_empty() {
+            // if the dictionary is empty, zstandard outputs nothing at all
+            let input = File::open(infile)?;
+            zstd::stream::copy_encode(input, &mut output, 0)?;
+        } else {
+            let mut input = File::open(infile)?;
+            let mut encoder = zstd::stream::write::Encoder::with_dictionary(&mut output, 0, dict)?;
+            io::copy(&mut input, &mut encoder)?;
+            // must finish the encoder to flush everything to the output
+            encoder.finish()?;
+        }
         let p2 = output.stream_position()?;
         output.seek(SeekFrom::Start(p1))?;
         header.write_all(&[b'L', b'N', 0, 8])?;
@@ -692,14 +703,19 @@ fn add_file<P: AsRef<Path>, W: Write + Seek>(
     Ok(())
 }
 
-fn scan_tree<W: Write + Seek>(basepath: &Path, mut output: W, mut di: u32) -> Result<u64, Error> {
+fn scan_tree<W: Write + Seek>(
+    basepath: &Path,
+    mut output: W,
+    dict: &Vec<u8>,
+) -> Result<u64, Error> {
+    let mut dir_id: u32 = 0;
     let mut file_count: u64 = 0;
     let mut subdirs: Vec<PathBuf> = Vec::new();
     subdirs.push(basepath.to_path_buf());
     while let Some(currdir) = subdirs.pop() {
         // add directory entry to archive for this current path
-        di += 1;
-        let dir_entry = DirectoryEntry::new(&currdir, di);
+        dir_id += 1;
+        let dir_entry = DirectoryEntry::new(&currdir, dir_id);
         let header = make_dir_header(&dir_entry)?;
         write_entry_header(&header, &mut output)?;
         let readdir = fs::read_dir(currdir)?;
@@ -711,12 +727,87 @@ fn scan_tree<W: Write + Seek>(basepath: &Path, mut output: W, mut di: u32) -> Re
             if metadata.is_dir() {
                 subdirs.push(path);
             } else if metadata.is_file() {
-                add_file(path, &mut output, Some(di))?;
+                add_file(path, &mut output, Some(dir_id), dict)?;
                 file_count += 1;
             }
         }
     }
     Ok(file_count)
+}
+
+// Retrieve up to 100 files of non-zero length for training with zstandard to
+// create a dictionary that yields significantly better results. The dictionary
+// must be saved and used when decompressing.
+//
+// If the returned dictionary has zero length, then no dictionary should be used
+// at all.
+fn zstd_sample_files(basepath: &Path) -> Result<Vec<u8>, Error> {
+    let mut file_count: u8 = 0;
+    let mut total_bytes: u64 = 0;
+    let mut samples: Vec<PathBuf> = Vec::new();
+    let mut subdirs: Vec<PathBuf> = Vec::new();
+    subdirs.push(basepath.to_path_buf());
+    while let Some(currdir) = subdirs.pop() {
+        let readdir = fs::read_dir(currdir)?;
+        for entry_result in readdir {
+            let entry = entry_result?;
+            // DirEntry.metadata() does not follow symlinks and that is good for
+            // the purpose of sampling files
+            let metadata = entry.metadata()?;
+            if metadata.is_dir() {
+                subdirs.push(entry.path());
+            } else if metadata.is_file() {
+                let file_len = metadata.len();
+                // zstandard dictionary training is limited to the first 128 KB
+                // of sample files; zero-length files are useless
+                if file_len > 0 && file_len < 131_072 {
+                    samples.push(entry.path());
+                    file_count += 1;
+                    total_bytes += file_len;
+                    if file_count > 100 || total_bytes > 1_073_741_824 {
+                        // zstandard training has a hard limit of 2 GB but may
+                        // as well stop once we have 1 GB of sample data as it
+                        // will all be loaded into contiguous memory
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    // sample the collected files
+    //
+    // The dict size should be no more than 1% of the sample size, and anything
+    // less than 2kb or more than 16kb is not going to make much difference in
+    // the common case. The dictionary size has a default limit of 100 KB.
+    //
+    // If an error occurs, it is most likely the "Src size is incorrect" which
+    // can be caused by a great many conditions, but probably the sample size is
+    // too small and zstandard simply rejects the training attempt.
+    //
+    let dict_size = std::cmp::min(16384, std::cmp::max(total_bytes / 100, 2048));
+    match zstd::dict::from_files(samples, dict_size as usize) {
+        Ok(dict) => Ok(dict),
+        Err(err) => {
+            println!(
+                "warning: sampling failed, will not use a dictionary; {:?}",
+                err
+            );
+            Ok(vec![])
+        }
+    }
+}
+
+fn append_dictionary<W: Write + Seek>(mut output: W, dict: &Vec<u8>) -> Result<(), Error> {
+    if !dict.is_empty() {
+        // write dict to the end of the file
+        let dict_pos = output.seek(SeekFrom::End(0))?;
+        output.write_all(dict)?;
+        // seek to offset 8 and write 8 bytes of dict offset
+        output.seek(SeekFrom::Start(8))?;
+        let dict_pos_be = u64::to_be_bytes(dict_pos);
+        output.write_all(&dict_pos_be)?;
+    }
+    Ok(())
 }
 
 fn read_archive_header<P: AsRef<Path>>(infile: P) -> Result<File, Error> {
@@ -736,9 +827,33 @@ fn read_archive_header<P: AsRef<Path>>(infile: P) -> Result<File, Error> {
     Ok(input)
 }
 
-fn list_entries<R: Read + Seek>(mut input: R) -> Result<(), Error> {
+// If the archive does not contain a dictionary, will return an empty vector and
+// file offset of zero.
+fn read_dictionary<R: Read + Seek>(mut input: R) -> Result<(Vec<u8>, u64), Error> {
+    input.seek(SeekFrom::Start(8))?;
+    let mut dict_offset_be = [0; 8];
+    input.read_exact(&mut dict_offset_be)?;
+    let start_of_data = input.stream_position()?;
+    let dict_offset = u64::from_be_bytes(dict_offset_be);
+    if dict_offset > 0 {
+        input.seek(SeekFrom::Start(dict_offset))?;
+        let mut dict: Vec<u8> = Vec::new();
+        input.read_to_end(&mut dict)?;
+        input.seek(SeekFrom::Start(start_of_data))?;
+        Ok((dict, dict_offset))
+    } else {
+        Ok((vec![], 0))
+    }
+}
+
+#[allow(unused_variables)]
+fn list_entries<R: BufRead + Seek>(
+    mut input: R,
+    dict: &Vec<u8>,
+    dict_offset: u64,
+) -> Result<(), Error> {
     // loop until the end of the file is reached
-    loop {
+    while input.stream_position()? < dict_offset {
         // read next 2 bytes as header size
         let mut header_size = [0; 2];
         match input.read_exact(&mut header_size) {
@@ -765,29 +880,44 @@ fn list_entries<R: Read + Seek>(mut input: R) -> Result<(), Error> {
                 if rows.contains_key(&0x4944) {
                     // create a DirectoryEntry from the supported tags in the HashMap
                     let entry = DirectoryEntry::from_map(&rows)?;
-                    println!("directory: {:?}", entry);
+                    println!("directory: {:?}", entry.metadata.name);
                 } else if rows.contains_key(&0x535a) {
                     // create a FileEntry from the supported tags in the HashMap
                     let entry = FileEntry::from_map(&rows)?;
-                    println!("file: {:?}", entry);
+                    println!("file: {:?}", entry.metadata.name);
+
+                    // TODO: skip over file content temporarily
+                    let pos: i64 = if let Some(clen) = entry.compressed_len {
+                        clen
+                    } else {
+                        entry.original_len
+                    } as i64;
+                    input.seek(SeekFrom::Current(pos))?;
 
                     // read the file data, decompressing as needed, print to stdout
-                    let mut chunk = if let Some(clen) = entry.compressed_len {
-                        input.take(clen)
-                    } else {
-                        input.take(entry.original_len)
-                    };
-                    if let Some(algo) = entry.comp_algo {
-                        if algo == "zstd" {
-                            zstd::stream::copy_decode(&mut chunk, io::stdout())?;
-                        } else {
-                            return Err(Error::UnsupportedCompAlgo(algo));
-                        }
-                    } else {
-                        let mut out = io::stdout();
-                        io::copy(&mut chunk, &mut out)?;
-                    }
-                    input = chunk.into_inner();
+                    // let mut chunk = if let Some(clen) = entry.compressed_len {
+                    //     input.take(clen)
+                    // } else {
+                    //     input.take(entry.original_len)
+                    // };
+                    // if let Some(algo) = entry.comp_algo {
+                    //     if algo == "zstd" {
+                    //         if dict.is_empty() {
+                    //             zstd::stream::copy_decode(&mut chunk, io::stdout())?;
+                    //         } else {
+                    //             let mut decoder =
+                    //                 zstd::stream::read::Decoder::with_dictionary(&mut chunk, dict)?;
+                    //             let mut out = io::stdout();
+                    //             io::copy(&mut decoder, &mut out)?;
+                    //         }
+                    //     } else {
+                    //         return Err(Error::UnsupportedCompAlgo(algo));
+                    //     }
+                    // } else {
+                    //     let mut out = io::stdout();
+                    //     io::copy(&mut chunk, &mut out)?;
+                    // }
+                    // input = chunk.into_inner();
                 } else {
                     return Err(Error::UnsupportedHeader);
                 }
@@ -800,16 +930,27 @@ fn list_entries<R: Read + Seek>(mut input: R) -> Result<(), Error> {
             }
         }
     }
+    Ok(())
 }
 
 fn main() {
-    let inpath = Path::new("tmp");
+    let inpath = Path::new("src");
+    let dict = zstd_sample_files(inpath).expect("error while sampling files");
     let mut outfile = File::create("output.exaf").expect("could not create file");
     write_archive_header(&mut outfile).expect("could not write header");
-    scan_tree(inpath, &mut outfile, 0).expect("could not scan tree");
-    println!("Archive created");
+    let file_count = scan_tree(inpath, &mut outfile, &dict).expect("could not scan tree");
+    // write dictionary at end of archive, update archive header with dict offset
+    append_dictionary(&mut outfile, &dict).expect("error writing dictionary");
+    println!("Archive created with {} files", file_count);
     let infile = PathBuf::from("output.exaf");
-    let input = read_archive_header(&infile).expect("could not read header");
-    list_entries(input).expect("could not read file");
+    let mut input = BufReader::new(read_archive_header(&infile).expect("could not read header"));
+    // read dictionary from archive
+    let (dict, dict_offset) = read_dictionary(&mut input).expect("error reading dictionary");
+    if dict_offset == 0 {
+        let metadata = fs::symlink_metadata(&infile).expect("error reading symlink metadata");
+        list_entries(input, &dict, metadata.len()).expect("could not read file");
+    } else {
+        list_entries(input, &dict, dict_offset).expect("could not read file");
+    }
     println!("Archive examined");
 }

@@ -2,13 +2,11 @@
 
 The EXtensible Archiver Format is intended to be used in compressing and archiving files. It offers an alternative to the well-known zip and 7-zip formats, with extensibility in mind, as well as trying to avoid the shortfalls of said formats.
 
-**This is a work in progress.** Thoughts and critiques are welcome, so if after reading all of this you have any comments or criticisms, please do not hesitate to share them by filing an issue. My initial plan is to develop something that will satisfy my needs, but I am also completely open to collaborating with others to develop a suitable format that others can use. Thank you.
+**This is a work in progress.** At the moment the proof of concept produces a file slightly smaller than a zip file, but much larger than a 7-zip file. Thoughts and critiques are welcome, so if after reading all of this you have any comments or criticisms, please do not hesitate to share them by filing an issue. My initial plan is to develop something that will satisfy my needs, but I am also completely open to collaborating with others to develop a suitable format that others can use. Thank you.
 
 ## Specification
 
-A proper one is coming soon, once the proof of concept is finished.
-
-If you can read an emacs [org-mode](https://orgmode.org) file, check out the `TODO.org` file for the file format as it exists currently.
+A proper one is coming soon, once the proof of concept is finished. If you can read an emacs [org-mode](https://orgmode.org) file, check out the `TODO.org` file for the file format as it exists currently.
 
 In short, it takes inspiration from both [xar](https://en.wikipedia.org/wiki/Xar_(archiver)) and [Exif](https://en.wikipedia.org/wiki/Exif) in that there is a basic header at the start of the file which identifies the format and version, followed by zero or more optional tag/value pairs akin to Exif or the zip format's "extra fields" as described [here](https://en.wikipedia.org/wiki/ZIP_(file_format)). While the archive header may not have all that many optional tags, the directory and file entries within the archive will consist entirely of these rows of metadata. This makes nearly all properties for directories and files optional, such as the user and group that own the file or the last accessed time.
 
@@ -16,7 +14,7 @@ A useful feature of these optional fields is to improve cross-platform support. 
 
 ## Objectives
 
-For now, the first objective is to complete the proof of concept by building an `exaf` binary that can pack and unpack archives, offering a modest amount of functionality. Eventually the purpose of this project will be to provide a binary (`exaf`) that will pack and unpack files into and out of archives, as well as a [Rust](https://www.rust-lang.org) library with an interface similar to that of the [tar crate](https://docs.rs/tar/latest/tar/).
+For now, the first objective is to complete the proof of concept by building an `exaf` binary that can pack and unpack archives, offering a modest amount of functionality. Eventually the purpose of this project will be to provide a full-featured binary as well as a [Rust](https://www.rust-lang.org) library with an interface similar to that of the [tar crate](https://docs.rs/tar/latest/tar/).
 
 Features will ultimately include the following:
 
