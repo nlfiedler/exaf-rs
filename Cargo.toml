@@ -1,5 +1,5 @@
 [package]
-name = "exaf"
+name = "exaf-rs"
 version = "0.1.0"
 edition = "2021"
 authors = ["Nathan Fiedler <nathanfiedler@fastmail.fm>"]
@@ -8,11 +8,13 @@ repository = "https://github.com/nlfiedler/exaf-rs"
 readme = "README.md"
 keywords = ["archiver", "compressor"]
 license = "MIT"
-default-run = "exaf"
+default-run = "exaf-rs"
 
 [dependencies]
+clap = "4.5.4"
 chrono = "0.4.37"
 libc = "0.2.153"
+os_str_bytes = { version = "7.0.0", features = ["conversions"] }
 sha-1 = "0.10.1"
 thiserror = "1.0.58"
 zstd = "0.13.1"

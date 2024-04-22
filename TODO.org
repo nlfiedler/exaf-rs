@@ -33,6 +33,7 @@
 | 'SA' | random salt for encrypting password       |
 | 'IT' | number of iterations depending on KDF     |
 | 'EA' | encryption algorithm (AES, Blowfish, etc) |
+*** 1 or more manifests of files and directories starts after header
 ** Archive entry considerations
 *** will need to ensure that any extended attributes are less than 64 KB
 *** directory entries are optional, but must appear before files that refer to them
@@ -44,14 +45,10 @@
 **** length of the field will be either 4 (32 bits) or 8 (64 bits)
 *** integer values will be serialized to the smallest number of bytes necessary
 **** e.g. values below 256 will be written as 1 byte
-*** each file and directory entry will consist several parts
-| Name        | Size | Purpose                                 |
-|-------------+------+-----------------------------------------|
-| Header size | 2    | length of the header in bytes           |
-| Header rows | N    | header rows as described below          |
+*** each file and directory entry will have a 2-byte size followed by header rows
 *** each header row consists of 2 + 2 + N bytes (tag, size, value)
-*** entry with row tag of =ID= is a directory while one with =SZ= is a file
-*** encrypted archives will have their header rows encrypted, only size is unencrypted
+*** entry with row tag of =ID= is a directory
+*** entry with row tag of =SZ= is a file
 ** Archive entry representing a directory
 *** codifies each unique path as a numeric value for efficiency
 *** file entries will refer to the containing directory by its identifier
@@ -87,12 +84,9 @@
 | Tag  | Size   | Purpose                             | Required? |
 |------+--------+-------------------------------------+-----------|
 | 'NM' | vary   | name of file                        | yes       |
-| 'SZ' | vary   | byte size of original data          | yes       |
 | 'DI' | vary   | directory identifier                |           |
 | 'MO' | vary   | Unix mode                           |           |
 | 'FA' | vary   | Windows file attributes             |           |
-| 'LN' | vary   | byte size of compressed data        |           |
-| 'CA' | vary   | compression algorithm               |           |
 | 'HA' | vary   | hash digest algorithm               |           |
 | 'CS' | vary   | hash digest of original data        |           |
 | 'MT' | 4 or 8 | modification date/time as Unix time |           |
@@ -104,64 +98,70 @@
 | 'GN' | vary   | group name                          |           |
 | 'GI' | vary   | group identifier                    |           |
 *** example entry
-| Tag  | Size |                                      Value |
-|------+------+--------------------------------------------|
-| 'NM' |   16 |                           take_snapshot.rs |
-| 'SZ' |    2 |                                      45130 |
-| 'DI' |    2 |                                      16344 |
-| 'MO' |    2 |                                   0o100644 |
-| 'LN' |    2 |                                       7205 |
-| 'CA' |    4 |                                     'LZMA' |
-| 'HA' |    4 |                                     'SHA1' |
-| 'CS' |   20 | 0xf29e0d471f31aca38e263720cb84ef5c7708a141 |
-| 'MT' |    4 |                                 0x6604C3BF |
-| 'UN' |    8 |                                   nfiedler |
-| 'UI' |    2 |                                        501 |
-| 'GN' |    5 |                                      staff |
-| 'GI' |    1 |                                         20 |
+| Tag  | Size | Value            |
+|------+------+------------------|
+| 'NM' |   16 | take_snapshot.rs |
+| 'DI' |    2 | 16344            |
+| 'MO' |    2 | 0o100644         |
+| 'MT' |    4 | 0x6604C3BF       |
+| 'UN' |    8 | nfiedler         |
+| 'UI' |    2 | 501              |
+| 'GN' |    5 | staff            |
+| 'GI' |    1 | 20               |
 * Action Plan
-** consider how to batch compress many files like pack does
-*** fill a buffer with file content, compress, write a header block, then write compressed data
-*** archive format would look like this
-1. archive header as usual
-2. header of directories and files, size of compressed block
-3. compressed block
-4. (repeat 2 and 3...)
-*** header structure
-- 2-byte number of entries in this block (max 65535)
-- 2-byte size of entry
-- entry rows (tag, size, value)
-- (repeat)
-- 4-byte size of (compressed) data that follows
-** remove the dictionary handling code
-** add =clap= for easier command line usage
-** make metadata storage optional based on flags
-** check if compressed block is smaller, otherwise keep original data
-** store symbolic link value as file data
-** encrypt file data after compression
-** document the basic format
+** TODO consider how to distinquish files from symbolic links
+** DONE consider how to batch compress many files like pack does
+*** fill a block with file content, compress, write the manifest, then compressed data
+*** manifest is like =itemcontent= from pack which maps file data into content blocks
+*** files that do not fit into a single block will continue in the next block
+*** if ~itempos~ is non-zero, file metadata will not be serialized to the block
+*** zero-length files have a =SZ= of =0= and no data in the block
+*** manifest header structure
+**** 2-byte size of the header in bytes followed by header rows
+**** fields
+| Tag  | Size | Description                     |
+|------+------+---------------------------------|
+| 'NE' | vary | number of entries in this block |
+| 'CA' | vary | compression algorithm ('ZSTD')  |
+| 'BS' | vary | block size in bytes             |
+**** file/directory entries follow (2-byte entry size, header rows)
+**** additional tags for stored content (files and symbolic links)
+| Tag  | Size | Description                                   |
+|------+------+-----------------------------------------------|
+| 'IP' | vary | item position: offset within file             |
+| 'CP' | vary | content position: offset within content block |
+| 'SZ' | vary | size in bytes of this piece of the file       |
+** TODO implenet archive reader with an =entries()= for ~list~ subcommand
+** TODO implement archive extraction
+** TODO store, list, extract an entire directory tree
+** DONE add =clap= for easier command line usage
+** TODO remove read/write of =CA= tag (compression algo) from =FileEntry=
+** TODO store (numeric) values using the least number of bytes
+** TODO make metadata storage optional based on flags
+** TODO check if compressed block is smaller, otherwise keep original data
+** TODO store symbolic link value as file data
+** TODO encrypt file data after compression
+** TODO encrypt header rows
+** TODO document the basic format
 ** develop library
 *** create a reader and writer like the =tar= crate
 *** optionally collect the extended attributes
 * Reference
 ** comparison with other archivers
 *** using httpd 2.4.59 source tree (3,138 files, 42,225,957 bytes)
-| archiver                       | output size |
-|--------------------------------+-------------|
-| exaf w/metadata                |    13109158 |
-| exaf w/o metdata               |    12745782 |
-| zip                            |    12514363 |
-| exaf w/meta, 16k dict          |    12386265 |
-| exaf no meta, 16k dict         |    12026176 |
-| exaf w/meta, liblzma level 5   |    11980243 |
-| exaf w/meta, liblzma level 9   |    11914867 |
-| exaf w/meta, level 7, 16k dict |    11540062 |
-| pack-2                         |     8691712 |
-| tar.bz2                        |     7503198 |
-| 7-zip                          |     6455217 |
+| archiver | byte size | time      |
+|----------+-----------+-----------|
+| zip      |  12557798 | 0m1.458s  |
+| tar.zst  |   8852419 | 0m0.379s  |
+| pack-rs  |   8843264 | 0m0.529s  |
+| Pack     |   8691712 | 0m0.244s  |
+| tar.bz2  |   7540345 | 0m4.948s  |
+| tar.xz   |   6464092 | 0m16.243s |
+| 7-zip    |   6455217 |           |
 ** Compression algorithms for consideration
 | Name  | Description              |
 |-------+--------------------------|
+| ZSTD  | ZStandard                |
 | LZMA  | Improved version of LZ77 |
 | LZMA2 | Improved version of LZMA |
 | BZip2 | Standard BWT algorithm   |

@@ -2,9 +2,10 @@
 // Copyright (c) 2024 Nathan Fiedler
 //
 use chrono::prelude::*;
+use clap::{arg, Command};
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -59,13 +60,23 @@ fn get_file_name<P: AsRef<Path>>(path: P) -> String {
 }
 
 ///
+/// Read the symbolic link value and convert to raw bytes.
+///
+fn read_link(path: &Path) -> Result<Vec<u8>, Error> {
+    // convert whatever value returned by the OS into raw bytes without string conversion
+    use os_str_bytes::OsStringBytes;
+    let value = fs::read_link(path)?;
+    Ok(value.into_os_string().into_raw_vec())
+}
+
+///
 /// Return the Unix file mode for the given path.
 ///
 #[cfg(target_family = "unix")]
-pub fn unix_mode<P: AsRef<Path>>(path: P) -> Option<u16> {
+pub fn unix_mode<P: AsRef<Path>>(path: P) -> Option<u32> {
     use std::os::unix::fs::MetadataExt;
     if let Ok(meta) = fs::symlink_metadata(path) {
-        Some(meta.mode() as u16)
+        Some(meta.mode())
     } else {
         None
     }
@@ -103,6 +114,7 @@ fn get_header_str(rows: &HashMap<u16, Vec<u8>>, key: &u16) -> Result<Option<Stri
     }
 }
 
+#[allow(dead_code)]
 fn get_header_u16(rows: &HashMap<u16, Vec<u8>>, key: &u16) -> Result<Option<u16>, Error> {
     if let Some(row) = rows.get(key) {
         let raw: [u8; 2] = row[0..2].try_into()?;
@@ -160,7 +172,7 @@ pub struct EntryMetadata {
     /// Name of the file, directory, or symbolic link.
     pub name: String,
     /// Unix file mode of the entry.
-    pub mode: Option<u16>,
+    pub mode: Option<u32>,
     /// Windows file attributes of the entry.
     pub attrs: Option<u32>,
     /// Unix user identifier
@@ -233,7 +245,7 @@ impl EntryMetadata {
     ///
     pub fn from_map(rows: &HashMap<u16, Vec<u8>>) -> Result<Self, Error> {
         let name = get_header_str(rows, &0x4e4d)?.ok_or_else(|| Error::MissingTag("NM".into()))?;
-        let mode = get_header_u16(rows, &0x4d4f)?;
+        let mode = get_header_u32(rows, &0x4d4f)?;
         let attrs = get_header_u32(rows, &0x4641)?;
         let uid = get_header_u32(rows, &0x5549)?;
         let gid = get_header_u32(rows, &0x4749)?;
@@ -437,11 +449,322 @@ impl DirectoryEntry {
     }
 }
 
+#[derive(PartialEq)]
+enum Kind {
+    File,
+    Link,
+}
+
+//
+// Represents the content of a file (item) and its position within a content
+// bundle when building an archive. It is possible that a portion of the file is
+// being added and thus the itempos might be non-zero; similarly the size may be
+// less than the actual file length.
+//
+struct IncomingContent {
+    // path of the file being packed
+    path: PathBuf,
+    // kind of item: file or symlink
+    kind: Kind,
+    // corresponding file entry identifier
+    file_id: u32,
+    // offset within the file from which to start, usually zero
+    itempos: u64,
+    // offset within the content bundle where the data will go
+    contentpos: u64,
+    // size of the item content
+    size: u64,
+}
+
+// Desired size of the compressed bundle of file data.
+const BUNDLE_SIZE: u64 = 16777216;
+
+///
+/// Creates or updates an archive.
+///
+struct PackBuilder<W: Write + Seek> {
+    // output to which archive will be written
+    output: W,
+    // identifier of the most recent directory entry
+    prev_dir_id: u32,
+    // directories to be written in the pending manifest
+    directories: Vec<DirectoryEntry>,
+    // identifier of the most recent file entry
+    prev_file_id: u32,
+    // files to be written, at least partially, in the pending manifest; the key is
+    // a numeric identifier that is unique to this archive
+    files: HashMap<u32, FileEntry>,
+    // byte offset within a bundle to which new content is added
+    current_pos: u64,
+    // item content that will reside in the bundle under construction
+    contents: Vec<IncomingContent>,
+    // buffer for compressing content bundle in memory (to get final size)
+    buffer: Option<Vec<u8>>,
+}
+
+impl<W: Write + Seek> PackBuilder<W> {
+    ///
+    /// Construct a new `PackBuilder` that will operate entirely in memory.
+    ///
+    fn new(mut output: W) -> Result<Self, Error> {
+        write_archive_header(&mut output)?;
+        Ok(Self {
+            output,
+            prev_dir_id: 0,
+            directories: vec![],
+            prev_file_id: 0,
+            files: HashMap::new(),
+            current_pos: 0,
+            contents: vec![],
+            buffer: None,
+        })
+    }
+
+    ///
+    /// Visit all of the files and directories within the specified path, adding
+    /// them to the archive.
+    ///
+    /// **Note:** Remember to call `finish()` when done adding content.
+    ///
+    fn add_dir_all<P: AsRef<Path>>(&mut self, basepath: P) -> Result<u64, Error> {
+        let mut file_count: u64 = 0;
+        let mut subdirs: Vec<(u32, PathBuf)> = Vec::new();
+        subdirs.push((self.prev_dir_id, basepath.as_ref().to_path_buf()));
+        while let Some((mut dir_id, currdir)) = subdirs.pop() {
+            dir_id = self.add_directory(&currdir)?;
+            let readdir = fs::read_dir(currdir)?;
+            for entry_result in readdir {
+                let entry = entry_result?;
+                let path = entry.path();
+                // DirEntry.metadata() does not follow symlinks and that is good
+                let metadata = entry.metadata()?;
+                if metadata.is_dir() {
+                    subdirs.push((dir_id, path));
+                } else if metadata.is_file() {
+                    self.add_file(&path, Some(dir_id))?;
+                    file_count += 1;
+                } else if metadata.is_symlink() {
+                    self.add_symlink(&path, Some(dir_id))?;
+                }
+            }
+        }
+        Ok(file_count)
+    }
+
+    ///
+    /// Call `finish()` when all file content has been added to the builder.
+    ///
+    fn finish(&mut self) -> Result<(), Error> {
+        if !self.contents.is_empty() {
+            self.process_contents()?;
+        }
+        Ok(())
+    }
+
+    ///
+    /// Process the current bundle of item content, clearing the collection and
+    /// resetting the current content position.
+    ///
+    fn process_contents(&mut self) -> Result<(), Error> {
+        self.insert_content()?;
+        self.contents = vec![];
+        self.current_pos = 0;
+        Ok(())
+    }
+
+    ///
+    /// Add directory entry to the manifest, returning the new directory identifier.
+    ///
+    fn add_directory<P: AsRef<Path>>(&mut self, path: P) -> Result<u32, Error> {
+        self.prev_dir_id += 1;
+        let dir_entry = DirectoryEntry::new(path, self.prev_dir_id);
+        self.directories.push(dir_entry);
+        Ok(self.prev_dir_id)
+    }
+
+    ///
+    /// Adds a single file to the archive, returning the item identifier.
+    ///
+    /// Depending on the size of the file and the content bundle so far, this
+    /// may result in writing one or more rows to the content and itemcontent
+    /// tables.
+    ///
+    /// **Note:** Remember to call `finish()` when done adding content.
+    ///
+    fn add_file<P: AsRef<Path>>(&mut self, path: P, parent: Option<u32>) -> Result<(), Error> {
+        self.prev_file_id += 1;
+        let file_entry = FileEntry::new(path.as_ref(), parent);
+        self.files.insert(self.prev_file_id, file_entry);
+
+        let md = fs::metadata(path.as_ref());
+        let file_len = match md.as_ref() {
+            Ok(attr) => attr.len(),
+            Err(_) => 0,
+        };
+        // empty files will result in a manifest entry whose size is zero,
+        // allowing for the extraction process to know to create an empty file
+        // (otherwise it is difficult to tell from the available data)
+        let mut itempos: u64 = 0;
+        let mut size: u64 = file_len;
+        loop {
+            if self.current_pos + size > BUNDLE_SIZE {
+                let remainder = BUNDLE_SIZE - self.current_pos;
+                // add a portion of the file to fill the bundle
+                let content = IncomingContent {
+                    path: path.as_ref().to_path_buf(),
+                    kind: Kind::File,
+                    file_id: self.prev_file_id,
+                    itempos,
+                    contentpos: self.current_pos,
+                    size: remainder,
+                };
+                self.contents.push(content);
+                // insert the content and itemcontent rows and start a new
+                // bundle, then continue with the current file
+                self.process_contents()?;
+                size -= remainder;
+                itempos += remainder;
+            } else {
+                // the remainder of the file fits within this content bundle
+                let content = IncomingContent {
+                    path: path.as_ref().to_path_buf(),
+                    kind: Kind::File,
+                    file_id: self.prev_file_id,
+                    itempos,
+                    contentpos: self.current_pos,
+                    size,
+                };
+                self.contents.push(content);
+                self.current_pos += size;
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    ///
+    /// Adds a symbolic link to the archive, returning the item identifier.
+    ///
+    /// **Note:** Remember to call `finish()` when done adding content.
+    ///
+    fn add_symlink<P: AsRef<Path>>(&mut self, _path: P, _parent: Option<u32>) -> Result<(), Error> {
+        // let name = get_file_name(path.as_ref());
+        // self.conn.execute(
+        //     "INSERT INTO item (parent, kind, name) VALUES (?1, ?2, ?3)",
+        //     (&parent, KIND_SYMLINK, &name),
+        // )?;
+        // let item_id = self.conn.last_insert_rowid();
+        // let md = fs::symlink_metadata(path.as_ref());
+        // let link_len = match md.as_ref() {
+        //     Ok(attr) => attr.len(),
+        //     Err(_) => 0,
+        // };
+        // // assume that the link value is relatively small and simply add it into
+        // // the current content bundle in whole
+        // let content = IncomingContent {
+        //     path: path.as_ref().to_path_buf(),
+        //     kind: KIND_SYMLINK,
+        //     item: item_id,
+        //     itempos: 0,
+        //     contentpos: self.current_pos,
+        //     size: link_len,
+        // };
+        // self.contents.push(content);
+        // self.current_pos += link_len;
+        // Ok(item_id)
+        Ok(())
+    }
+
+    //
+    // Creates a content bundle based on the data collected so far, then
+    // compresses it, writing the blob to a new row in the `content` table. Then
+    // creates the necessary rows in the `itemcontent` table to map the file
+    // data to the content bundle.
+    //
+    fn insert_content(&mut self) -> Result<(), Error> {
+        // Allocate a buffer for the compressed data, reusing it each time. For
+        // small data sets this makes no observable difference, but for any
+        // large data set (e.g. Linux kernel), it makes a huge difference.
+        let mut content: Vec<u8> = if let Some(mut buf) = self.buffer.take() {
+            buf.clear();
+            buf
+        } else {
+            Vec::with_capacity(BUNDLE_SIZE as usize)
+        };
+
+        // iterate through the file contents, compressing to the output
+        let mut encoder = zstd::stream::write::Encoder::new(content, 0)?;
+        for item in self.contents.iter() {
+            if item.kind == Kind::File {
+                let mut input = fs::File::open(&item.path)?;
+                input.seek(SeekFrom::Start(item.itempos))?;
+                let mut chunk = input.take(item.size);
+                io::copy(&mut chunk, &mut encoder)?;
+            } else if item.kind == Kind::Link {
+                let value = read_link(&item.path)?;
+                encoder.write_all(&value)?;
+            }
+        }
+        content = encoder.finish()?;
+
+        // serialize the manifest header to the output
+        let num_entries = (self.directories.len() + self.files.len()) as u16;
+        let header = make_manifest_header(num_entries, content.len())?;
+        write_entry_header(&header, &mut self.output)?;
+
+        // write all of the directory entries to the output
+        for dir_entry in self.directories.iter() {
+            let header = make_dir_header(&dir_entry)?;
+            write_entry_header(&header, &mut self.output)?;
+        }
+
+        // serialize item contents, and their corresponding file entries, as a
+        // single unit
+        for content in self.contents.iter() {
+            let file_entry = self
+                .files
+                .get(&content.file_id)
+                .expect("internal error, missing file entry for item content");
+            let mut fheader = make_file_header(&file_entry)?;
+            let mut cheader = make_content_header(&content)?;
+            fheader.append(&mut cheader);
+            write_entry_header(&fheader, &mut self.output)?;
+        }
+
+        // write the compressed buffer to the output
+        self.output.write_all(&mut content)?;
+
+        self.buffer = Some(content);
+        Ok(())
+    }
+}
+
 fn write_archive_header<W: Write>(mut output: W) -> io::Result<()> {
-    // TODO: write the version and remaining header size using BE
+    // Any optional header rows would be serialized to a buffer here, and that
+    // length would be written as the last two bytes of this `version` row, then
+    // the buffer would be written to the output.
     let version = [b'E', b'X', b'A', b'F', 1, 0, 0, 0];
     output.write_all(&version)?;
     Ok(())
+}
+
+fn make_manifest_header(num_entries: u16, block_size: usize) -> Result<Vec<u8>, Error> {
+    let mut header: Vec<u8> = Vec::new();
+
+    // NE: number (of) entries
+    header.write_all(&[b'N', b'E', 0, 2])?;
+    let num_entries_raw = u16::to_be_bytes(num_entries);
+    header.write_all(&num_entries_raw)?;
+
+    // CA: compression algorithm (0 for copy, 1 for zstd)
+    header.write_all(&[b'C', b'A', 0, 1, 1])?;
+
+    // BS: block size (never larger than 2^32 bytes)
+    header.write_all(&[b'B', b'S', 0, 4])?;
+    let block_size_raw = u32::to_be_bytes(block_size as u32);
+    header.write_all(&block_size_raw)?;
+
+    Ok(header)
 }
 
 fn make_dir_header(dir_entry: &DirectoryEntry) -> io::Result<Vec<u8>> {
@@ -471,8 +794,8 @@ fn make_dir_header(dir_entry: &DirectoryEntry) -> io::Result<Vec<u8>> {
 
     // MO: Unix file mode, if available
     if let Some(mode) = dir_entry.metadata.mode {
-        header.write_all(&[b'M', b'O', 0, 2])?;
-        let unix_mode = u16::to_be_bytes(mode);
+        header.write_all(&[b'M', b'O', 0, 4])?;
+        let unix_mode = u32::to_be_bytes(mode);
         header.write_all(&unix_mode)?;
     }
 
@@ -556,8 +879,8 @@ fn make_file_header(file_entry: &FileEntry) -> io::Result<Vec<u8>> {
 
     // MO: Unix file mode, if available
     if let Some(mode) = file_entry.metadata.mode {
-        header.write_all(&[b'M', b'O', 0, 2])?;
-        let unix_mode = u16::to_be_bytes(mode);
+        header.write_all(&[b'M', b'O', 0, 4])?;
+        let unix_mode = u32::to_be_bytes(mode);
         header.write_all(&unix_mode)?;
     }
 
@@ -645,6 +968,29 @@ fn make_file_header(file_entry: &FileEntry) -> io::Result<Vec<u8>> {
     Ok(header)
 }
 
+fn make_content_header(item_content: &IncomingContent) -> io::Result<Vec<u8>> {
+    // build out the header data piece by piece
+    let mut header: Vec<u8> = Vec::new();
+
+    // IP: item position (up to 64 bits)
+    header.write_all(&[b'I', b'P', 0, 8])?;
+    let itempos = u64::to_be_bytes(item_content.itempos);
+    header.write_all(&itempos)?;
+
+    // CP: content position (never more than 32 bits)
+    header.write_all(&[b'C', b'P', 0, 4])?;
+    let content_pos = u32::to_be_bytes(item_content.contentpos as u32);
+    header.write_all(&content_pos)?;
+    // size: u64,
+
+    // SZ: size of content (never more than 32 bits)
+    header.write_all(&[b'S', b'Z', 0, 4])?;
+    let size = u32::to_be_bytes(item_content.size as u32);
+    header.write_all(&size)?;
+
+    Ok(header)
+}
+
 fn write_entry_header<W: Write>(header: &[u8], mut output: W) -> io::Result<()> {
     // write the fully realized header to the output
     let header_len = u16::to_be_bytes(header.len() as u16);
@@ -653,74 +999,10 @@ fn write_entry_header<W: Write>(header: &[u8], mut output: W) -> io::Result<()> 
     Ok(())
 }
 
-fn add_file<P: AsRef<Path>, W: Write + Seek>(
-    infile: P,
-    mut output: W,
-    di: Option<u32>,
-) -> io::Result<()> {
-    let mut file_entry = FileEntry::new(infile.as_ref(), di);
-    file_entry = file_entry.compute_sha1(infile.as_ref())?;
-    let mut header = make_file_header(&file_entry)?;
-    // very small files often get larger when passed through a compressor
-    if file_entry.original_len > 256 {
-        // Write out the appropriate number of zeros to advance the file pointer
-        // to where the compressed data should be written, then back up and fill
-        // in the finalized header data, then finally advance to the end.
-        header.write_all(&[b'C', b'A', 0, 4, b'z', b's', b't', b'd'])?;
-        let p1 = output.stream_position()?;
-        // header-size field (2 bytes) + header length + upcoming LN row
-        let header_len = 2 + header.len() + 12;
-        let mut zeros: Vec<u8> = Vec::with_capacity(header_len);
-        zeros.resize(header_len, 0);
-        output.write_all(&zeros)?;
-        let p15 = output.stream_position()?;
-        let input = File::open(infile)?;
-        zstd::stream::copy_encode(input, &mut output, 0)?;
-        let p2 = output.stream_position()?;
-        output.seek(SeekFrom::Start(p1))?;
-        header.write_all(&[b'L', b'N', 0, 8])?;
-        let data_len = u64::to_be_bytes(p2 - p15);
-        header.write_all(&data_len)?;
-        write_entry_header(&header, &mut output)?;
-        output.seek(SeekFrom::Start(p2))?;
-    } else {
-        // If not compressing, then simply write the file header and copy the
-        // file contents as-is to the output stream.
-        write_entry_header(&header, &mut output)?;
-        let mut input = File::open(infile)?;
-        io::copy(&mut input, &mut output)?;
-    }
-    Ok(())
-}
-
-fn scan_tree<W: Write + Seek>(basepath: &Path, mut output: W) -> Result<u64, Error> {
-    let mut dir_id: u32 = 0;
-    let mut file_count: u64 = 0;
-    let mut subdirs: Vec<PathBuf> = Vec::new();
-    subdirs.push(basepath.to_path_buf());
-    while let Some(currdir) = subdirs.pop() {
-        // add directory entry to archive for this current path
-        dir_id += 1;
-        let dir_entry = DirectoryEntry::new(&currdir, dir_id);
-        let header = make_dir_header(&dir_entry)?;
-        write_entry_header(&header, &mut output)?;
-        let readdir = fs::read_dir(currdir)?;
-        for entry_result in readdir {
-            let entry = entry_result?;
-            let path = entry.path();
-            // DirEntry.metadata() does not follow symlinks and that is good
-            let metadata = entry.metadata()?;
-            if metadata.is_dir() {
-                subdirs.push(path);
-            } else if metadata.is_file() {
-                add_file(path, &mut output, Some(dir_id))?;
-                file_count += 1;
-            }
-        }
-    }
-    Ok(file_count)
-}
-
+// TODO: turn this into a factory method that will construct a pack reader
+// TODO: version 1 pack reader will then read the optional header fields into a map
+// TODO: pack reader will take ownership of the input File
+#[allow(dead_code)]
 fn read_archive_header<P: AsRef<Path>>(infile: P) -> Result<File, Error> {
     let mut input = File::open(infile)?;
     let mut archive_start = [0; 8];
@@ -738,6 +1020,7 @@ fn read_archive_header<P: AsRef<Path>>(infile: P) -> Result<File, Error> {
     Ok(input)
 }
 
+#[allow(dead_code)]
 fn list_entries<R: BufRead + Seek>(mut input: R) -> Result<(), Error> {
     // loop until the end of the file is reached
     loop {
@@ -819,15 +1102,128 @@ fn list_entries<R: BufRead + Seek>(mut input: R) -> Result<(), Error> {
     }
 }
 
-fn main() {
-    let inpath = Path::new("src");
-    let mut outfile = File::create("output.exaf").expect("could not create file");
-    write_archive_header(&mut outfile).expect("could not write header");
-    let file_count = scan_tree(inpath, &mut outfile).expect("could not scan tree");
-    // write dictionary at end of archive, update archive header with dict offset
-    println!("Archive created with {} files", file_count);
-    let infile = PathBuf::from("output.exaf");
-    let input = BufReader::new(read_archive_header(&infile).expect("could not read header"));
-    list_entries(input).expect("could not read file");
-    println!("Archive examined");
+///
+/// Create a pack file at the given location and add all of the named inputs.
+///
+/// Returns the total number of files added to the archive.
+///
+fn create_archive<P: AsRef<Path>>(archive: P, inputs: Vec<&PathBuf>) -> Result<u64, Error> {
+    let path_ref = archive.as_ref();
+    let path = match path_ref.extension() {
+        Some(_) => path_ref.to_path_buf(),
+        None => path_ref.with_extension("exa"),
+    };
+    let output = File::create(path)?;
+    let mut builder = PackBuilder::new(output)?;
+    let mut file_count: u64 = 0;
+    for input in inputs {
+        let metadata = input.metadata()?;
+        if metadata.is_dir() {
+            file_count += builder.add_dir_all(input)?;
+        } else if metadata.is_file() {
+            builder.add_file(input, None)?;
+            file_count += 1;
+        }
+    }
+    builder.finish()?;
+    Ok(file_count)
+}
+
+///
+/// List all file entries in the archive in breadth-first order.
+///
+fn list_contents(_archive: &str) -> Result<(), Error> {
+    // if !pack_rs::is_pack_file(archive)? {
+    //     return Err(Error::NotPackFile);
+    // }
+    // let reader = PackReader::new(archive)?;
+    // let entries = reader.entries()?;
+    // for result in entries {
+    //     let entry = result?;
+    //     if entry.kind != KIND_DIRECTORY {
+    //         println!("{}", entry.name)
+    //     }
+    // }
+    Ok(())
+}
+
+///
+/// Extract all of the files from the archive.
+///
+fn extract_contents(_archive: &str) -> Result<u64, Error> {
+    // if !pack_rs::is_pack_file(archive)? {
+    //     return Err(Error::NotPackFile);
+    // }
+    // let reader = PackReader::new(archive)?;
+    // let file_count = reader.extract_all()?;
+    // Ok(file_count)
+    Ok(0)
+}
+
+fn cli() -> Command {
+    Command::new("exaf-rs")
+        .about("Archiver/compressor")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            Command::new("create")
+                .about("Creates an archive from a set of files.")
+                .short_flag('c')
+                .arg(arg!(archive: <ARCHIVE> "File path to which the archive will be written."))
+                .arg(
+                    arg!(<INPUTS> ... "Files to add to archive")
+                        .value_parser(clap::value_parser!(PathBuf)),
+                )
+                .arg_required_else_help(true),
+        )
+        .subcommand(
+            Command::new("list")
+                .about("Lists the contents of an archive.")
+                .short_flag('l')
+                .arg(arg!(archive: <ARCHIVE> "File path specifying the archive to read from."))
+                .arg_required_else_help(true),
+        )
+        .subcommand(
+            Command::new("extract")
+                .about("Extracts one or more files from an archive.")
+                .short_flag('x')
+                .arg(arg!(archive: <ARCHIVE> "File path specifying the archive to read from."))
+                .arg_required_else_help(true),
+        )
+}
+
+fn main() -> Result<(), Error> {
+    let matches = cli().get_matches();
+    match matches.subcommand() {
+        Some(("create", sub_matches)) => {
+            let archive = sub_matches
+                .get_one::<String>("archive")
+                .map(|s| s.as_str())
+                .unwrap_or("archive.exa");
+            let inputs = sub_matches
+                .get_many::<PathBuf>("INPUTS")
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            let file_count = create_archive(archive, inputs)?;
+            println!("Added {} files to {}", file_count, archive);
+        }
+        Some(("list", sub_matches)) => {
+            let archive = sub_matches
+                .get_one::<String>("archive")
+                .map(|s| s.as_str())
+                .unwrap_or("archive.exa");
+            list_contents(archive)?;
+        }
+        Some(("extract", sub_matches)) => {
+            let archive = sub_matches
+                .get_one::<String>("archive")
+                .map(|s| s.as_str())
+                .unwrap_or("archive.exa");
+            let file_count = extract_contents(archive)?;
+            println!("Extracted {} files from {}", file_count, archive)
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
 }
