@@ -57,7 +57,7 @@ pub enum Error {
 ///
 /// Return the last part of the path, converting to a String.
 ///
-pub(crate) fn get_file_name<P: AsRef<Path>>(path: P) -> String {
+fn get_file_name<P: AsRef<Path>>(path: P) -> String {
     // ignore any paths that end in '..'
     if let Some(p) = path.as_ref().file_name() {
         // ignore any paths that failed UTF-8 translation
@@ -72,7 +72,7 @@ pub(crate) fn get_file_name<P: AsRef<Path>>(path: P) -> String {
 ///
 /// Read the symbolic link value and convert to raw bytes.
 ///
-pub(crate) fn read_link(path: &Path) -> Result<Vec<u8>, Error> {
+fn read_link(path: &Path) -> Result<Vec<u8>, Error> {
     // convert whatever value returned by the OS into raw bytes without string conversion
     use os_str_bytes::OsStringBytes;
     let value = fs::read_link(path)?;
@@ -105,7 +105,7 @@ fn write_link(contents: &[u8], filepath: &Path) -> Result<(), Error> {
 /// Return the Unix file mode for the given path.
 ///
 #[cfg(target_family = "unix")]
-pub(crate) fn unix_mode<P: AsRef<Path>>(path: P) -> Option<u32> {
+fn unix_mode<P: AsRef<Path>>(path: P) -> Option<u32> {
     use std::os::unix::fs::MetadataExt;
     if let Ok(meta) = fs::symlink_metadata(path) {
         Some(meta.mode())
@@ -115,7 +115,7 @@ pub(crate) fn unix_mode<P: AsRef<Path>>(path: P) -> Option<u32> {
 }
 
 #[cfg(target_family = "windows")]
-pub(crate) fn unix_mode<P: AsRef<Path>>(_path: P) -> Option<u32> {
+fn unix_mode<P: AsRef<Path>>(_path: P) -> Option<u32> {
     None
 }
 
@@ -123,12 +123,12 @@ pub(crate) fn unix_mode<P: AsRef<Path>>(_path: P) -> Option<u32> {
 /// Return the Windows file attributes for the given path.
 ///
 #[cfg(target_family = "unix")]
-pub(crate) fn file_attrs<P: AsRef<Path>>(_path: P) -> Option<u32> {
+fn file_attrs<P: AsRef<Path>>(_path: P) -> Option<u32> {
     None
 }
 
 #[cfg(target_family = "windows")]
-pub(crate) fn file_attrs<P: AsRef<Path>>(path: P) -> Option<u32> {
+fn file_attrs<P: AsRef<Path>>(path: P) -> Option<u32> {
     use std::os::windows::prelude::*;
     if let Ok(meta) = fs::symlink_metadata(path) {
         Some(meta.file_attributes())
@@ -144,7 +144,7 @@ pub(crate) fn file_attrs<P: AsRef<Path>>(path: P) -> Option<u32> {
 /// refer to the parent directory will be stripped ("foo/../bar" will become
 /// "foo/bar").
 ///
-pub fn sanitize_path<P: AsRef<Path>>(dirty: P) -> Result<PathBuf, Error> {
+fn sanitize_path<P: AsRef<Path>>(dirty: P) -> Result<PathBuf, Error> {
     let components = dirty.as_ref().components();
     let allowed = components.filter(|c| matches!(c, Component::Normal(_)));
     let mut path = PathBuf::new();
@@ -245,21 +245,6 @@ impl TryFrom<u8> for KeyDerivation {
 }
 
 ///
-/// Optional values read from the archive header.
-///
-#[allow(dead_code)]
-pub struct ArchiveHeader {
-    /// Encryption algorithm
-    enc_algo: Encryption,
-    /// Key derivation algorithm
-    key_algo: KeyDerivation,
-    /// Salt for deriving the key from a passphrase
-    salt: Option<Vec<u8>>,
-    /// Number of iterations for the key derivation function
-    key_iter: Option<u32>,
-}
-
-///
 /// Represents a file, directory, or symbolic link within an archive.
 ///
 pub struct Entry {
@@ -279,7 +264,7 @@ pub struct Entry {
     uid: Option<u32>,
     // name of the owning user
     user: Option<String>,
-    // unix group identifier
+    // Unix group identifier
     gid: Option<u32>,
     // name of the owning group
     group: Option<String>,

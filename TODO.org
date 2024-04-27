@@ -114,16 +114,15 @@
 | 'SL' | vary | name of symbolic link          | yes       |
 | 'PA' | vary | identifier of parent directory |           |
 * Action Plan
-** TODO test with small bundle size to force multiple bundles
-** TODO if ~itempos~ is non-zero, file metadata should not be serialized to the block
-** TODO store (numeric) values using the least number of bytes
-** TODO maybe =Reader= should read the =ArchiveHeader= on open to avoid API misuse
-*** in fact, =ArchiveHeader= should not need to be public API at all
+** TODO document the basic format
 ** TODO check if compressed block is smaller, otherwise keep original data
 ** TODO pack builder can never store more than 65,535 files in a single block
 ** TODO implement =Reader.entries()= that returns an iterator
 ** TODO add an =unpack()= to the iterator item
 *** =unpack()= should work for files, links, and directories
+** TODO add =extract_all()= to =Reader=
+** TODO test: unit tests for =HeaderBuilder= and its number downsizing
+** TODO test: unit tests for all of the =get_header_*()= functions (number upsizing)
 ** TODO test: unit test that creates and extracts the =tiny_tree= set
 ** TODO test: unit tests for =read_link()=
 ** TODO test: unit tests for =write_link()=
@@ -131,10 +130,11 @@
 *** need to find a maintained crate, =sodiumoxide= is deprecated
 *** https://crates.io/crates/orion (MIT)
 ** TODO encrypt header rows
-** TODO document the basic format
 ** TODO store metadata if option is given
+*** if ~itempos~ is non-zero, file metadata should not be serialized to the block
 ** TODO adding new files to an archive needs to determine the highest unique identifier of the existing directories
 ** TODO set file/dir/link MT, AT, CT, mode, owners, etc on extract
+** TODO write examples
 ** nice-to-have: sort incoming files by type (image vs text) to afford better compression
 *** if files of a similar nature are grouped together, compression should yield better results
 ** nice-to-have: retain extended file attributes

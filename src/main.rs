@@ -40,7 +40,6 @@ fn create_archive<P: AsRef<Path>>(archive: P, inputs: Vec<&PathBuf>) -> Result<u
 ///
 fn list_contents<P: AsRef<Path>>(archive: P) -> Result<(), Error> {
     let mut reader = exaf_rs::reader::from_file(archive)?;
-    let _archive_hdr = reader.read_archive_header()?;
     exaf_rs::reader::list_entries(&mut reader)
 }
 
@@ -49,7 +48,6 @@ fn list_contents<P: AsRef<Path>>(archive: P) -> Result<(), Error> {
 ///
 fn extract_contents<P: AsRef<Path>>(archive: P) -> Result<u64, Error> {
     let mut reader = exaf_rs::reader::from_file(archive)?;
-    let _archive_hdr = reader.read_archive_header()?;
     exaf_rs::reader::extract_entries(&mut reader)
 }
 

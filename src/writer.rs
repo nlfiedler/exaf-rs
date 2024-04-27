@@ -116,7 +116,8 @@ impl<W: Write + Seek> PackBuilder<W> {
     ///
     fn process_contents(&mut self) -> Result<(), Error> {
         self.insert_content()?;
-        self.contents = vec![];
+        self.contents.clear();
+        self.directories.clear();
         self.current_pos = 0;
         Ok(())
     }
@@ -265,7 +266,7 @@ impl<W: Write + Seek> PackBuilder<W> {
         content = encoder.finish()?;
 
         // serialize the manifest header to the output
-        let num_entries = (self.directories.len() + self.files.len()) as u16;
+        let num_entries = (self.directories.len() + self.contents.len()) as u16;
         write_manifest_header(num_entries, content.len(), &mut self.output)?;
 
         // write all of the directory entries to the output
@@ -335,32 +336,55 @@ impl HeaderBuilder {
 
     /// Add a single u16 value to the header.
     fn add_u16(&mut self, tag: u16, value: u16) -> Result<(), Error> {
-        let tag_bytes = u16::to_be_bytes(tag);
-        self.buffer.write_all(&tag_bytes)?;
-        self.buffer.write_all(&[0, 2])?;
-        let value_bytes = u16::to_be_bytes(value);
-        self.buffer.write_all(&value_bytes)?;
-        self.row_count += 1;
-        Ok(())
+        if value < 256 {
+            self.add_u8(tag, value as u8)
+        } else {
+            let tag_bytes = u16::to_be_bytes(tag);
+            self.buffer.write_all(&tag_bytes)?;
+            self.buffer.write_all(&[0, 2])?;
+            let value_bytes = u16::to_be_bytes(value);
+            self.buffer.write_all(&value_bytes)?;
+            self.row_count += 1;
+            Ok(())
+        }
     }
 
     /// Add a single u32 value to the header.
     fn add_u32(&mut self, tag: u16, value: u32) -> Result<(), Error> {
-        let tag_bytes = u16::to_be_bytes(tag);
-        self.buffer.write_all(&tag_bytes)?;
-        self.buffer.write_all(&[0, 4])?;
-        let value_bytes = u32::to_be_bytes(value);
-        self.buffer.write_all(&value_bytes)?;
-        self.row_count += 1;
-        Ok(())
+        if value < 65_536 {
+            self.add_u16(tag, value as u16)
+        } else {
+            let tag_bytes = u16::to_be_bytes(tag);
+            self.buffer.write_all(&tag_bytes)?;
+            self.buffer.write_all(&[0, 4])?;
+            let value_bytes = u32::to_be_bytes(value);
+            self.buffer.write_all(&value_bytes)?;
+            self.row_count += 1;
+            Ok(())
+        }
     }
 
     /// Add a single u64 value to the header.
     fn add_u64(&mut self, tag: u16, value: u64) -> Result<(), Error> {
+        if value < 4_294_967_296 {
+            self.add_u32(tag, value as u32)
+        } else {
+            let tag_bytes = u16::to_be_bytes(tag);
+            self.buffer.write_all(&tag_bytes)?;
+            self.buffer.write_all(&[0, 8])?;
+            let value_bytes = u64::to_be_bytes(value);
+            self.buffer.write_all(&value_bytes)?;
+            self.row_count += 1;
+            Ok(())
+        }
+    }
+
+    /// Add a single i32 value to the header.
+    fn add_i32(&mut self, tag: u16, value: i32) -> Result<(), Error> {
         let tag_bytes = u16::to_be_bytes(tag);
         self.buffer.write_all(&tag_bytes)?;
         self.buffer.write_all(&[0, 8])?;
-        let value_bytes = u64::to_be_bytes(value);
+        let value_bytes = i32::to_be_bytes(value);
         self.buffer.write_all(&value_bytes)?;
         self.row_count += 1;
         Ok(())
@@ -368,13 +392,17 @@ impl HeaderBuilder {
 
     /// Add a single i64 value to the header.
     fn add_i64(&mut self, tag: u16, value: i64) -> Result<(), Error> {
-        let tag_bytes = u16::to_be_bytes(tag);
-        self.buffer.write_all(&tag_bytes)?;
-        self.buffer.write_all(&[0, 8])?;
-        let value_bytes = i64::to_be_bytes(value);
-        self.buffer.write_all(&value_bytes)?;
-        self.row_count += 1;
-        Ok(())
+        if value <= 2_147_483_647 || value >= -2_147_483_648 {
+            self.add_i32(tag, value as i32)
+        } else {
+            let tag_bytes = u16::to_be_bytes(tag);
+            self.buffer.write_all(&tag_bytes)?;
+            self.buffer.write_all(&[0, 8])?;
+            let value_bytes = i64::to_be_bytes(value);
+            self.buffer.write_all(&value_bytes)?;
+            self.row_count += 1;
+            Ok(())
+        }
     }
 
     /// Add a variable length string to the header.

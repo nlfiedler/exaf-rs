@@ -135,7 +135,6 @@ pub fn list_entries(input: &mut Reader) -> Result<(), Error> {
 }
 
 // describes a file/link that will be extracted from the content block
-#[allow(dead_code)]
 #[derive(Debug)]
 struct OutboundContent {
     // offset within the content for this chunk of file
@@ -204,9 +203,8 @@ pub fn extract_entries(input: &mut Reader) -> Result<u64, Error> {
                     };
                     if entry.dir_id.is_some() {
                         // ensure directories exist, even the empty ones
-                        //
-                        // let fpath = pack_rs::sanitize_path(path)?; TODO
-                        fs::create_dir_all(path)?;
+                        let fpath = super::sanitize_path(path)?;
+                        fs::create_dir_all(fpath)?;
                     } else {
                         let content = OutboundContent::try_from(entry_rows.clone())?;
                         files.push((content, path));
@@ -305,8 +303,7 @@ fn read_header_v1<R: Read>(mut input: R) -> Result<HeaderMapV1, Error> {
     Ok(rows)
 }
 
-// TODO: these get functions are temporarily public
-pub fn get_header_str(rows: &HeaderMapV1, key: &u16) -> Result<Option<String>, Error> {
+fn get_header_str(rows: &HeaderMapV1, key: &u16) -> Result<Option<String>, Error> {
     if let Some(row) = rows.get(key) {
         let s = String::from_utf8(row.to_owned())?;
         Ok(Some(s))
@@ -315,7 +312,7 @@ pub fn get_header_str(rows: &HeaderMapV1, key: &u16) -> Result<Option<String>, E
     }
 }
 
-pub fn get_header_u8(rows: &HeaderMapV1, key: &u16) -> Result<Option<u8>, Error> {
+fn get_header_u8(rows: &HeaderMapV1, key: &u16) -> Result<Option<u8>, Error> {
     if let Some(row) = rows.get(key) {
         Ok(Some(row[0]))
     } else {
@@ -323,9 +320,17 @@ pub fn get_header_u8(rows: &HeaderMapV1, key: &u16) -> Result<Option<u8>, Error>
     }
 }
 
-pub fn get_header_u16(rows: &HeaderMapV1, key: &u16) -> Result<Option<u16>, Error> {
+fn pad_to_u16(row: &Vec<u8>) -> [u8; 2] {
+    if row.len() == 1 {
+        [0, row[0]]
+    } else {
+        [row[0], row[1]]
+    }
+}
+
+fn get_header_u16(rows: &HeaderMapV1, key: &u16) -> Result<Option<u16>, Error> {
     if let Some(row) = rows.get(key) {
-        let raw: [u8; 2] = row[0..2].try_into()?;
+        let raw: [u8; 2] = pad_to_u16(row);
         let v = u16::from_be_bytes(raw);
         Ok(Some(v))
     } else {
@@ -333,9 +338,19 @@ pub fn get_header_u16(rows: &HeaderMapV1, key: &u16) -> Result<Option<u16>, Erro
     }
 }
 
-pub fn get_header_u32(rows: &HeaderMapV1, key: &u16) -> Result<Option<u32>, Error> {
+fn pad_to_u32(row: &Vec<u8>) -> [u8; 4] {
+    if row.len() == 1 {
+        [0, 0, 0, row[0]]
+    } else if row.len() == 2 {
+        [0, 0, row[0], row[1]]
+    } else {
+        [row[0], row[1], row[2], row[3]]
+    }
+}
+
+fn get_header_u32(rows: &HeaderMapV1, key: &u16) -> Result<Option<u32>, Error> {
     if let Some(row) = rows.get(key) {
-        let raw: [u8; 4] = row[0..4].try_into()?;
+        let raw: [u8; 4] = pad_to_u32(row);
         let v = u32::from_be_bytes(raw);
         Ok(Some(v))
     } else {
@@ -343,9 +358,23 @@ pub fn get_header_u32(rows: &HeaderMapV1, key: &u16) -> Result<Option<u32>, Erro
     }
 }
 
-pub fn get_header_u64(rows: &HeaderMapV1, key: &u16) -> Result<Option<u64>, Error> {
+fn pad_to_u64(row: &Vec<u8>) -> [u8; 8] {
+    if row.len() == 1 {
+        [0, 0, 0, 0, 0, 0, 0, row[0]]
+    } else if row.len() == 2 {
+        [0, 0, 0, 0, 0, 0, row[0], row[1]]
+    } else if row.len() == 4 {
+        [0, 0, 0, 0, row[0], row[1], row[2], row[3]]
+    } else {
+        [
+            row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7],
+        ]
+    }
+}
+
+fn get_header_u64(rows: &HeaderMapV1, key: &u16) -> Result<Option<u64>, Error> {
     if let Some(row) = rows.get(key) {
-        let raw: [u8; 8] = row[0..8].try_into()?;
+        let raw: [u8; 8] = pad_to_u64(row);
         let v = u64::from_be_bytes(raw);
         Ok(Some(v))
     } else {
@@ -353,22 +382,43 @@ pub fn get_header_u64(rows: &HeaderMapV1, key: &u16) -> Result<Option<u64>, Erro
     }
 }
 
-pub fn get_header_time(rows: &HeaderMapV1, key: &u16) -> Result<Option<DateTime<Utc>>, Error> {
+fn get_header_time(rows: &HeaderMapV1, key: &u16) -> Result<Option<DateTime<Utc>>, Error> {
     if let Some(row) = rows.get(key) {
-        let raw: [u8; 8] = row[0..8].try_into()?;
-        let secs = i64::from_be_bytes(raw);
-        Ok(DateTime::from_timestamp(secs, 0))
+        if row.len() == 4 {
+            let raw: [u8; 4] = row[0..4].try_into()?;
+            let secs = i32::from_be_bytes(raw);
+            Ok(DateTime::from_timestamp(secs as i64, 0))
+        } else {
+            let raw: [u8; 8] = row[0..8].try_into()?;
+            let secs = i64::from_be_bytes(raw);
+            Ok(DateTime::from_timestamp(secs, 0))
+        }
     } else {
         Ok(None)
     }
 }
 
-pub fn get_header_bytes(rows: &HeaderMapV1, key: &u16) -> Result<Option<Vec<u8>>, Error> {
+fn get_header_bytes(rows: &HeaderMapV1, key: &u16) -> Result<Option<Vec<u8>>, Error> {
     if let Some(row) = rows.get(key) {
         Ok(Some(row.to_owned()))
     } else {
         Ok(None)
     }
+}
+
+///
+/// Optional values read from the archive header.
+///
+#[allow(dead_code)]
+pub struct ArchiveHeader {
+    /// Encryption algorithm
+    enc_algo: Encryption,
+    /// Key derivation algorithm
+    key_algo: KeyDerivation,
+    /// Salt for deriving the key from a passphrase
+    salt: Option<Vec<u8>>,
+    /// Number of iterations for the key derivation function
+    key_iter: Option<u32>,
 }
 
 impl TryFrom<HeaderMapV1> for ArchiveHeader {
@@ -482,21 +532,6 @@ impl<R: Read> ReaderV1<R> {
             input: RefCell::new(input),
         }
     }
-
-    // Read the given number of bytes from the input.
-    #[allow(dead_code)]
-    fn read_n_bytes(&mut self, size: u64) -> Result<Vec<u8>, Error> {
-        let mut bytes: Vec<u8> = Vec::new();
-        let me = self.input.get_mut();
-        let mut chunk = me.take(size);
-        let bytes_read = chunk.read_to_end(&mut bytes)?;
-        if bytes_read != size as usize {
-            return Err(Error::UnexpectedEof);
-        }
-        // TODO: no need to call this afterwards? difficult with RefCell
-        // me = chunk.into_inner();
-        Ok(bytes)
-    }
 }
 
 impl<R: Read + Seek> VersionedReader for ReaderV1<R> {
@@ -515,7 +550,10 @@ impl<R: Read + Seek> VersionedReader for ReaderV1<R> {
         let input = self.input.get_mut();
         let mut taker = input.take(count);
         let mut content: Vec<u8> = vec![];
-        taker.read_to_end(&mut content)?;
+        let bytes_read = taker.read_to_end(&mut content)? as u64;
+        if bytes_read != count {
+            return Err(Error::UnexpectedEof);
+        }
         Ok(content)
     }
 
@@ -524,17 +562,23 @@ impl<R: Read + Seek> VersionedReader for ReaderV1<R> {
     }
 }
 
+#[allow(dead_code)]
 pub struct Reader {
+    // underlying reader for a specific file format
     reader: Box<dyn VersionedReader>,
+    // archive header read from the input data
+    header: ArchiveHeader,
 }
 
 impl Reader {
-    ///
-    /// Read the archive header from the current position.
-    ///
-    pub fn read_archive_header(&mut self) -> Result<ArchiveHeader, Error> {
-        let rows = self.reader.read_next_header()?;
-        ArchiveHeader::try_from(rows)
+    /// Create a new Reader with the given versioned reader.
+    fn new(mut input: Box<dyn VersionedReader>) -> Result<Self, Error> {
+        let rows = input.read_next_header()?;
+        let header = ArchiveHeader::try_from(rows)?;
+        Ok(Self {
+            reader: input,
+            header,
+        })
     }
 }
 
@@ -570,9 +614,7 @@ pub fn from_file<P: AsRef<Path>>(infile: P) -> Result<Reader, Error> {
     if archive_start[4..6] != [1, 0] {
         return Err(Error::UnsupportedVersion);
     }
-    Ok(Reader {
-        reader: Box::new(ReaderV1::new(input)),
-    })
+    Reader::new(Box::new(ReaderV1::new(input)))
 }
 
 #[cfg(test)]
