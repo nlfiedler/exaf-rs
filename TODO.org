@@ -1,22 +1,26 @@
 * Format
 ** Considerations
 *** flexible, extensible format supporting optional fields of various lengths
-*** records various metadata about files and directories if available from OS
+*** added content is appended to the end of the file
+*** can record metadata for files and directories when available
 *** numeric fields are network byte order (Big Endian)
 *** textual fields are UTF-8 encoded
 *** may include data checksums for verification
 *** XML is flexible, supports complex data types
 *** JSON is smaller than XML, easy to parse
-*** EXIF style is compact (rows of tuples consisting of tag, size, value)
-**** ~header rows~ will consist of 2-byte tag, 2-byte size, and N bytes of value
-**** overall header size and individual rows will never be longer than 64 KB
+*** EXIF style is compact (rows of 3-tuples, ranging in length from 5 to 65,539 bytes)
 *** CBOR is very compact but dependent on finding good implementations
 ** Encrytion
 *** password is used to derive a key using one of various algorithms, typically with a salt
 *** derived key (aka secret) is used to perform symmetric-key encryption on the file data
 *** directory/file header data rows are encrypted to prevent listing of archive contents
+** Basic header format
+*** Most elements are represented with a ~header~
+*** Header starts with 2 bytes that indicate the number of rows (max 65,535)
+*** Each row has 2-byte tag + 2-byte size + N-byte value (max 65,535)
+*** Integer values will be serialized to the smallest number of bytes
 ** Archive header
-*** EXIF style entries after the initial version-specific rows
+*** magic number, version, optional header
 | Offset | Size | Purpose                        |
 |--------+------+--------------------------------|
 |      0 |    4 | File signature ('EXAF')        |
@@ -29,95 +33,19 @@
 *** fields related to encryption
 | Tag  | Purpose                                   |
 |------+-------------------------------------------|
+| 'EA' | encryption algorithm (AES, Blowfish, etc) |
 | 'KD' | key derivation algorithm (i.e. Argon2id)  |
 | 'SA' | random salt for encrypting password       |
-| 'IT' | number of iterations depending on KDF     |
-| 'EA' | encryption algorithm (AES, Blowfish, etc) |
+| 'KI' | number of iterations depending on KDF     |
 *** 1 or more manifests of files and directories starts after header
-** Archive entry considerations
-*** will need to ensure that any extended attributes are less than 64 KB
-*** directory entries are optional, but must appear before files that refer to them
-*** duplicate directory entries are permissible for easier addition of files
-** Archive entry structure
-*** all file paths and names are UTF-8 encoded
-*** entry date/time is ~Unix time~ (seconds since the epoch) as 32 or 64 bits
-**** https://en.wikipedia.org/wiki/Unix_time
-**** length of the field will be either 4 (32 bits) or 8 (64 bits)
-*** integer values will be serialized to the smallest number of bytes necessary
-**** e.g. values below 256 will be written as 1 byte
-*** each file and directory entry will have a 2-byte size followed by header rows
-*** each header row consists of 2 + 2 + N bytes (tag, size, value)
-*** entry with row tag of =ID= is a directory
-*** entry with row tag of =SZ= is a file
-** Archive entry representing a directory
-*** codifies each unique path as a numeric value for efficiency
-*** file entries will refer to the containing directory by its identifier
-*** fields
-| Tag  | Size   | Purpose                             | Required? |
-|------+--------+-------------------------------------+-----------|
-| 'ID' | vary   | Unique identifier                   | yes       |
-| 'NM' | vary   | name of directory                   | yes       |
-| 'PA' | vary   | parent path as UTF-8                |           |
-| 'MO' | vary   | Unix mode                           |           |
-| 'FA' | vary   | Windows file attributes             |           |
-| 'MT' | 4 or 8 | modification date/time as Unix time |           |
-| 'CT' | 4 or 8 | creation date/time as Unix time     |           |
-| 'AT' | 4 or 8 | access date/time as Unix time       |           |
-| 'XA' | vary   | Extended file system attributes     |           |
-| 'UN' | vary   | name of FS owner                    |           |
-| 'UI' | vary   | user identifier                     |           |
-| 'GN' | vary   | name of FS group                    |           |
-| 'GI' | vary   | group identifier                    |           |
-*** example entry
-| Tag  | Size | Value                        |
-|------+------+------------------------------|
-| 'MO' |    2 | 0o40755                      |
-| 'ID' |    2 | 16344                        |
-| 'PA' |   28 | node_modules/saml2-js/lib-js |
-| 'MT' |    4 | 0x6604C3BF                   |
-| 'UN' |    8 | nfiedler                     |
-| 'UI' |    2 | 501                          |
-| 'GN' |    5 | staff                        |
-| 'GI' |    1 | 20                           |
-** Archive entry representing a file
-*** fields
-| Tag  | Size   | Purpose                             | Required? |
-|------+--------+-------------------------------------+-----------|
-| 'NM' | vary   | name of file                        | yes       |
-| 'DI' | vary   | directory identifier                |           |
-| 'MO' | vary   | Unix mode                           |           |
-| 'FA' | vary   | Windows file attributes             |           |
-| 'HA' | vary   | hash digest algorithm               |           |
-| 'CS' | vary   | hash digest of original data        |           |
-| 'MT' | 4 or 8 | modification date/time as Unix time |           |
-| 'CT' | 4 or 8 | creation date/time as Unix time     |           |
-| 'AT' | 4 or 8 | access date/time as Unix time       |           |
-| 'XA' | vary   | Extended file system attributes     |           |
-| 'UN' | vary   | user name                           |           |
-| 'UI' | vary   | user identifier                     |           |
-| 'GN' | vary   | group name                          |           |
-| 'GI' | vary   | group identifier                    |           |
-*** example entry
-| Tag  | Size | Value            |
-|------+------+------------------|
-| 'NM' |   16 | take_snapshot.rs |
-| 'DI' |    2 | 16344            |
-| 'MO' |    2 | 0o100644         |
-| 'MT' |    4 | 0x6604C3BF       |
-| 'UN' |    8 | nfiedler         |
-| 'UI' |    2 | 501              |
-| 'GN' |    5 | staff            |
-| 'GI' |    1 | 20               |
-* Action Plan
-** TODO consider how to distinquish files from symbolic links
-** DONE consider how to batch compress many files like pack does
-*** fill a block with file content, compress, write the manifest, then compressed data
-*** manifest is like =itemcontent= from pack which maps file data into content blocks
+** Archive manifest structure
+*** starts with a small header that describes the rest of the manifest
+*** followed by 1 or more (up to 65,535) file/link/dir entries
 *** files that do not fit into a single block will continue in the next block
-*** if ~itempos~ is non-zero, file metadata will not be serialized to the block
 *** zero-length files have a =SZ= of =0= and no data in the block
 *** manifest header structure
 **** 2-byte size of the header in bytes followed by header rows
+**** header size is for the following fields, not the entire set of entries
 **** fields
 | Tag  | Size | Description                     |
 |------+------+---------------------------------|
@@ -131,22 +59,87 @@
 | 'IP' | vary | item position: offset within file             |
 | 'CP' | vary | content position: offset within content block |
 | 'SZ' | vary | size in bytes of this piece of the file       |
-** TODO implenet archive reader with an =entries()= for ~list~ subcommand
-** TODO implement archive extraction
-** TODO store, list, extract an entire directory tree
-** DONE add =clap= for easier command line usage
-** TODO remove read/write of =CA= tag (compression algo) from =FileEntry=
+** Archive entry considerations
+*** directory entries are optional, but must appear before any entries that refer to them
+*** duplicate directory entries are permissible for easier addition of files
+** Archive entry structure
+*** all file paths and names are UTF-8 encoded
+*** entry date/time is ~Unix time~ (seconds since the epoch) as 32 or 64 bits
+**** https://en.wikipedia.org/wiki/Unix_time
+**** length of the field will be either 4 (32 bits) or 8 (64 bits)
+*** entry with row tag of =ID= is a directory
+*** entry with row tag of =SL= is a symbolic link
+*** entry with neither =ID= nor =SL= is a file
+** Archive entry representing a directory
+*** codifies each unique path as a numeric value for efficiency
+*** file entries will refer to the containing directory by its identifier
+*** nested directories will refer to their parent directory by the unique id
+*** fields
+| Tag  | Size   | Purpose                             | Required? |
+|------+--------+-------------------------------------+-----------|
+| 'ID' | vary   | Unique identifier                   | yes       |
+| 'NM' | vary   | name of directory                   | yes       |
+| 'PA' | vary   | identifier of parent directory      |           |
+| 'MO' | vary   | Unix mode                           |           |
+| 'FA' | vary   | Windows file attributes             |           |
+| 'MT' | 4 or 8 | modification date/time as Unix time |           |
+| 'CT' | 4 or 8 | creation date/time as Unix time     |           |
+| 'AT' | 4 or 8 | access date/time as Unix time       |           |
+| 'UN' | vary   | name of FS owner                    |           |
+| 'UI' | vary   | user identifier                     |           |
+| 'GN' | vary   | name of FS group                    |           |
+| 'GI' | vary   | group identifier                    |           |
+** Archive entry representing a file
+*** fields
+| Tag  | Size   | Purpose                             | Required? |
+|------+--------+-------------------------------------+-----------|
+| 'NM' | vary   | name of file                        | yes       |
+| 'PA' | vary   | identifier of parent directory      |           |
+| 'MO' | vary   | Unix mode                           |           |
+| 'FA' | vary   | Windows file attributes             |           |
+| 'HA' | vary   | hash digest algorithm               |           |
+| 'CS' | vary   | hash digest of original data        |           |
+| 'MT' | 4 or 8 | modification date/time as Unix time |           |
+| 'CT' | 4 or 8 | creation date/time as Unix time     |           |
+| 'AT' | 4 or 8 | access date/time as Unix time       |           |
+| 'UN' | vary   | user name                           |           |
+| 'UI' | vary   | user identifier                     |           |
+| 'GN' | vary   | group name                          |           |
+| 'GI' | vary   | group identifier                    |           |
+** Archive entry representing a symbolic link
+*** typically symbolic links do not have metadata, depends on OS
+*** fields
+| Tag  | Size | Purpose                        | Required? |
+|------+------+--------------------------------+-----------|
+| 'SL' | vary | name of symbolic link          | yes       |
+| 'PA' | vary | identifier of parent directory |           |
+* Action Plan
+** TODO test with small bundle size to force multiple bundles
+** TODO if ~itempos~ is non-zero, file metadata should not be serialized to the block
 ** TODO store (numeric) values using the least number of bytes
-** TODO make metadata storage optional based on flags
+** TODO maybe =Reader= should read the =ArchiveHeader= on open to avoid API misuse
+*** in fact, =ArchiveHeader= should not need to be public API at all
 ** TODO check if compressed block is smaller, otherwise keep original data
-** TODO store symbolic link value as file data
+** TODO pack builder can never store more than 65,535 files in a single block
+** TODO implement =Reader.entries()= that returns an iterator
+** TODO add an =unpack()= to the iterator item
+*** =unpack()= should work for files, links, and directories
+** TODO test: unit test that creates and extracts the =tiny_tree= set
+** TODO test: unit tests for =read_link()=
+** TODO test: unit tests for =write_link()=
 ** TODO encrypt file data after compression
+*** need to find a maintained crate, =sodiumoxide= is deprecated
+*** https://crates.io/crates/orion (MIT)
 ** TODO encrypt header rows
 ** TODO document the basic format
-** develop library
-*** create a reader and writer like the =tar= crate
-*** optionally collect the extended attributes
-* Reference
+** TODO store metadata if option is given
+** TODO adding new files to an archive needs to determine the highest unique identifier of the existing directories
+** TODO set file/dir/link MT, AT, CT, mode, owners, etc on extract
+** nice-to-have: sort incoming files by type (image vs text) to afford better compression
+*** if files of a similar nature are grouped together, compression should yield better results
+** nice-to-have: retain extended file attributes
+*** need to record the names and raw values in some form of map
+* Benchmarks
 ** comparison with other archivers
 *** using httpd 2.4.59 source tree (3,138 files, 42,225,957 bytes)
 | archiver | byte size | time      |
@@ -158,6 +151,7 @@
 | tar.bz2  |   7540345 | 0m4.948s  |
 | tar.xz   |   6464092 | 0m16.243s |
 | 7-zip    |   6455217 |           |
+* Reference
 ** Compression algorithms for consideration
 | Name  | Description              |
 |-------+--------------------------|
@@ -197,15 +191,15 @@
 * Alternatives
 ** Pack
 *** https://github.com/PackOrganization/Pack
-*** Zstandard compression, stored as blobs in SQLite
+*** Zstandard compression, stored as very large blobs in SQLite
 *** written in Pascal with custom built Zstandard and SQLite
 ** zip
 *** https://users.cs.jmu.edu/buchhofp/forensics/formats/pkzip.html
-*** flawed encryption, irregular entry structure due to organic growth
+*** flawed encryption, irregular entry structure due to evolutionary growth
 ** tar
 *** https://www.gnu.org/software/tar/manual/html_node/Standard.html
 *** there is much overhead per entry
-*** compression of whole file makes random access difficult
+*** compression of whole file makes random access inefficient
 ** 7-zip
 *** https://www.7-zip.org
 *** encrypted files can still have their contents listed
@@ -213,3 +207,4 @@
 ** xar
 *** https://en.wikipedia.org/wiki/Xar_(archiver)
 *** not widely available
+*** suitable for packages and application deliverables
