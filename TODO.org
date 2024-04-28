@@ -140,17 +140,32 @@
 ** nice-to-have: retain extended file attributes
 *** need to record the names and raw values in some form of map
 * Benchmarks
-** comparison with other archivers
-*** using httpd 2.4.59 source tree (3,138 files, 42,225,957 bytes)
-| archiver | byte size | time      |
-|----------+-----------+-----------|
-| zip      |  12557798 | 0m1.458s  |
-| tar.zst  |   8852419 | 0m0.379s  |
-| pack-rs  |   8843264 | 0m0.529s  |
-| Pack     |   8691712 | 0m0.244s  |
-| tar.bz2  |   7540345 | 0m4.948s  |
-| tar.xz   |   6464092 | 0m16.243s |
-| 7-zip    |   6455217 |           |
+** Apache HTTPD 2.4.59 source
+*** Ubuntu 22.04 VM, 8 Xeon X5550 2.67 GHz cores, 8 GB RAM, HDD
+| archiver      | version | byte size | time      |
+|---------------+---------+-----------+-----------|
+| apparent size |         |  42225957 | ---       |
+| Info-Zip      |     3.0 |  12557798 | 0m1.458s  |
+| tar.zst       |    1.34 |   8852419 | 0m0.379s  |
+| pack-rs       | 52cae5a |   8843264 | 0m0.529s  |
+| exaf-rs       | ff113a8 |   8806379 | 0m0.550s  |
+| Pack          |       2 |   8691712 | 0m0.244s  |
+| tar.bz2       |    1.34 |   7540345 | 0m4.948s  |
+| tar.xz        |    1.34 |   6464092 | 0m16.243s |
+| 7-zip         |   23.01 |   6451788 | 0m9.200s  |
+** Linux 6.8.6 source
+*** Ubuntu 22.04 VM, 8 Xeon X5550 2.67 GHz cores, 8 GB RAM, HDD
+*** the very slow tests were run only one time
+| description   | version |       size | time      |
+|---------------+---------+------------+-----------|
+| apparent size |         | 1420319384 | ---       |
+| Info-Zip      |     3.0 |  297273354 | 0m41.645s |
+| pack-rs       | 52cae5a |  218034176 | 0m13.757s |
+| exaf-rs       | ff113a8 |  217369649 | 0m15.377s |
+| tar.zst       |    1.34 |  216776407 | 0m7.536s  |
+| tar.bz2       |    1.34 |  176093102 | 2m22.274s |
+| 7-zip         |   23.01 |  148663215 | 1m49.768s |
+| tar.xz        |    1.34 |  144296084 | 9m51.828s |
 * Reference
 ** Compression algorithms for consideration
 | Name  | Description              |

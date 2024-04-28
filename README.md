@@ -1,6 +1,6 @@
 # Exaf
 
-The EXtensible Archiver Format is intended to be used in compressing and archiving files. It offers an alternative to the well-known zip and 7-zip formats, with extensibility in mind.
+The EXtensible Archiver Format is intended to be used in compressing and archiving files. It offers an alternative to the well-known zip and 7-zip formats, with extensibility in mind. The running time is similar to that of GNU tar with Zstandard compression, and the resulting file size is very similar. It is much faster and the file size is considerably smaller than Info-Zip. While the file size is larger than that of 7-zip, the run time is much less.
 
 **This is a work in progress.** There is a basic working prototype and the format is, for the most part, settled and will be documented soon.
 
@@ -8,11 +8,13 @@ The EXtensible Archiver Format is intended to be used in compressing and archivi
 
 A proper one is coming soon. If you can read an emacs [org-mode](https://orgmode.org) file, check out the `TODO.org` file for the file format as it exists currently.
 
-In short, it takes inspiration from both [xar](https://en.wikipedia.org/wiki/Xar_(archiver)) and [Exif](https://en.wikipedia.org/wiki/Exif) in that there is a basic header at the start of the file which identifies the format and version, followed by zero or more optional tag/value pairs akin to Exif or the zip format's "extra fields" as described [here](https://en.wikipedia.org/wiki/ZIP_(file_format)). The directory and file entries within the archive also consist entirely of tag/size/value tuples.
+In short, it is like tar when compressed with Zstandard, but with less overhead, and sets of files are combined into compressed content blocks, rather than compressing the entire file. It takes inspiration from both [xar](https://en.wikipedia.org/wiki/Xar_(archiver)) and [Exif](https://en.wikipedia.org/wiki/Exif) in that there is a basic header at the start of the file which identifies the format and version, followed by zero or more optional tag/value pairs akin to Exif or the zip format's "extra fields" as described [here](https://en.wikipedia.org/wiki/ZIP_(file_format)). The directory and file entries within the archive consist entirely of tag/size/value tuples.
+
+What distinquishes this format from that of tar with Zstandard is that the table of contents is not compressed and thus the entries can be quickly perused. Rather than compressing the entire file in one pass, the file content is grouped into large chunks and then compressed. Each set of compressed data is prefixed by the corresponding directory/file/link metadata. In this way, the format is similar to Xar with multiple occurrences of the TOC and heap, as needed. An advantage to this format is that new content can simply be appended to the end of the existing file.
 
 ## Objectives
 
-For now, the first objective was to complete the proof of concept by building an `exaf` binary that can create, list, and extract archives, offering a modest amount of functionality -- that has basically been achieved as of now. The next task will be to provide a full-featured binary as well as a [Rust](https://www.rust-lang.org) library with an interface similar to that of the [tar crate](https://docs.rs/tar/latest/tar/).
+For now, the first objective was to complete the proof of concept by building an `exaf` binary that can create, list, and extract archives, offering a modest amount of functionality -- that has basically been achieved. The next task will be to provide a full-featured binary as well as a [Rust](https://www.rust-lang.org) library with an interface similar to that of the [tar crate](https://docs.rs/tar/latest/tar/).
 
 ## Build and Run
 
@@ -66,4 +68,4 @@ Extracted 3138 files from archive.exa
 
 There are [many existing](https://en.wikipedia.org/wiki/List_of_archive_formats) archive formats, many of which have long since fallen out of common use. Those that remain are not without their shortcomings, such as poorly implemented encryption features, or vulnerability to compression factor exploits (*zip bomb*).
 
-The original motivation to start this project began when [O](https://github.com/OttoCoddo) announced the [pack](https://pack.ac) file format. They introduced a novel approach to the problem of archiving and compressing files while lamenting the general lack of progress in this area.
+The original motivation to start this project began when [O](https://github.com/OttoCoddo) announced the [pack](https://pack.ac) file format. They introduced a novel approach to the problem of archiving and compressing files while lamenting the general lack of progress in this area. My own Rust version of this can be found [here](https://github.com/nlfiedler/pack-rs). It's speed and output size are nearly identical to that of this project.
