@@ -11,9 +11,12 @@ license = "MIT"
 default-run = "exaf-rs"
 
 [dependencies]
+aes-gcm = "0.10.3"
+argon2 = "0.5.3"
 clap = "4.5.4"
 chrono = "0.4.37"
 libc = "0.2.153"
 os_str_bytes = { version = "7.0.0", features = ["conversions"] }
+rand_core = { version = "0.6.4", features = ["getrandom"] }
 thiserror = "1.0.58"
 zstd = "0.13.1"

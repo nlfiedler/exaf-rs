@@ -49,6 +49,12 @@ pub struct PackBuilder<W: Write + Seek> {
     contents: Vec<IncomingContent>,
     // buffer for compressing content bundle in memory (to get final size)
     buffer: Option<Vec<u8>>,
+    // buffer for building up the manifest + content in memory
+    manifest: Option<Vec<u8>>,
+    // chosen encryption algorithm, possibly none
+    encryption: Encryption,
+    // secret key for encrypting files, if encryption is enabled
+    secret_key: Option<Vec<u8>>,
 }
 
 impl<W: Write + Seek> PackBuilder<W> {
@@ -56,7 +62,7 @@ impl<W: Write + Seek> PackBuilder<W> {
     /// Construct a new `PackBuilder` that will operate entirely in memory.
     ///
     pub fn new(mut output: W) -> Result<Self, Error> {
-        write_archive_header(&mut output)?;
+        write_archive_header(&mut output, None)?;
         Ok(Self {
             output,
             prev_dir_id: 0,
@@ -66,7 +72,36 @@ impl<W: Write + Seek> PackBuilder<W> {
             current_pos: 0,
             contents: vec![],
             buffer: None,
+            manifest: None,
+            encryption: Encryption::None,
+            secret_key: None,
         })
+    }
+
+    ///
+    /// Enable encryption when building this archive, using the given passphrase.
+    ///
+    pub fn enable_encryption(
+        mut self,
+        kd: KeyDerivation,
+        ea: Encryption,
+        password: &str,
+    ) -> Result<Self, Error> {
+        if self.prev_dir_id > 0 || self.prev_file_id > 0 {
+            return Err(Error::InternalError("pack must be empty".into()));
+        }
+        self.encryption = ea.clone();
+        let salt = generate_salt(&kd)?;
+        self.secret_key = Some(derive_key(&kd, password, &salt)?);
+        // reset the output position and write out a new archive header that
+        // includes the encryption information provided
+        self.output.seek(SeekFrom::Start(0))?;
+        let mut header = HeaderBuilder::new();
+        header.add_u8(TAG_ENC_ALGO, ea.into())?;
+        header.add_u8(TAG_KEY_DERIV, kd.into())?;
+        header.add_bytes(TAG_SALT, &salt)?;
+        write_archive_header(&mut self.output, Some(header))?;
+        Ok(self)
     }
 
     ///
@@ -138,11 +173,10 @@ impl<W: Write + Seek> PackBuilder<W> {
     }
 
     ///
-    /// Adds a single file to the archive, returning the item identifier.
+    /// Adds a single file to the archive.
     ///
     /// Depending on the size of the file and the content bundle so far, this
-    /// may result in writing one or more rows to the content and itemcontent
-    /// tables.
+    /// may result in writing one or more manifest/content pairs to the output.
     ///
     /// **Note:** Remember to call `finish()` when done adding content.
     ///
@@ -199,7 +233,7 @@ impl<W: Write + Seek> PackBuilder<W> {
     }
 
     ///
-    /// Adds a symbolic link to the archive, returning the item identifier.
+    /// Adds a symbolic link to the archive.
     ///
     /// **Note:** Remember to call `finish()` when done adding content.
     ///
@@ -235,9 +269,8 @@ impl<W: Write + Seek> PackBuilder<W> {
 
     //
     // Creates a content bundle based on the data collected so far, then
-    // compresses it, writing the blob to a new row in the `content` table. Then
-    // creates the necessary rows in the `itemcontent` table to map the file
-    // data to the content bundle.
+    // compresses it, produces a manifest to describe the entries in this
+    // bundle, optionally encrypts everything, and finally writes to the output.
     //
     fn insert_content(&mut self) -> Result<(), Error> {
         // Allocate a buffer for the compressed data, reusing it each time. For
@@ -250,7 +283,7 @@ impl<W: Write + Seek> PackBuilder<W> {
             Vec::with_capacity(BUNDLE_SIZE as usize)
         };
 
-        // iterate through the file contents, compressing to the output
+        // iterate through the file contents, compressing to the buffer
         let mut encoder = zstd::stream::write::Encoder::new(content, 0)?;
         for item in self.contents.iter() {
             if item.kind == Kind::File {
@@ -265,16 +298,29 @@ impl<W: Write + Seek> PackBuilder<W> {
         }
         content = encoder.finish()?;
 
-        // serialize the manifest header to the output
-        let num_entries = (self.directories.len() + self.contents.len()) as u16;
-        write_manifest_header(num_entries, content.len(), &mut self.output)?;
+        // serialize everything to an in-memory buffer to allow for easier
+        // encryption, in which we need to know the block size before writing
+        // the encryption header to the file _before_ the encrypted block
+        // (reader must know how many bytes to read)
+        let mut output: Vec<u8> = if let Some(mut buf) = self.manifest.take() {
+            buf.clear();
+            buf
+        } else {
+            // add some capacity for the manifest entries
+            Vec::with_capacity(content.len() / 2 * 3)
+        };
+
+        // create the manifest header
+        let num_entries = (self.directories.len() + self.contents.len()) as u32;
+        let header = make_manifest_header(num_entries, content.len())?;
+        header.write_header(&mut output)?;
 
         // write all of the directory entries to the output
         for dir_entry in self.directories.iter() {
             let mut header = HeaderBuilder::new();
             add_directory_rows(&dir_entry, &mut header)?;
             // add_metadata_rows(&dir_entry, &mut header)?;
-            header.write_header(&mut self.output)?;
+            header.write_header(&mut output)?;
         }
 
         // serialize item contents, and their corresponding file entries, as a
@@ -288,23 +334,42 @@ impl<W: Write + Seek> PackBuilder<W> {
             add_file_rows(&file_entry, &mut header)?;
             // add_metadata_rows(&file_entry, &mut header)?;
             add_content_rows(&content, &mut header)?;
-            header.write_header(&mut self.output)?;
+            header.write_header(&mut output)?;
         }
 
         // write the compressed buffer to the output
-        self.output.write_all(&mut content)?;
+        output.write_all(&mut content)?;
+
+        // if encryption is enabled, write an additional header and then the
+        // encrypted block of manifest + content; the result of this will likely
+        // be a larger (new) buffer, which will take the place of the working
+        // buffer named `output`
+        if let Some(ref secret) = self.secret_key {
+            let (cipher, nonce) = encrypt_data(&self.encryption, secret, output.as_slice())?;
+            let mut header = HeaderBuilder::new();
+            header.add_bytes(TAG_INIT_VECTOR, &nonce)?;
+            header.add_u32(TAG_ENCRYPTED_SIZE, cipher.len() as u32)?;
+            header.write_header(&mut self.output)?;
+            output = cipher;
+        }
+        let mut cursor = std::io::Cursor::new(&output);
+        io::copy(&mut cursor, &mut self.output)?;
 
         self.buffer = Some(content);
+        self.manifest = Some(output);
         Ok(())
     }
 }
 
-fn write_archive_header<W: Write>(mut output: W) -> io::Result<()> {
-    // Any optional header rows would be serialized to a buffer here, and that
-    // length would be written as the last two bytes of this `version` row, then
-    // the buffer would be written to the output.
-    let version = [b'E', b'X', b'A', b'F', 1, 0, 0, 0];
+fn write_archive_header<W: Write>(mut output: W, rows: Option<HeaderBuilder>) -> Result<(), Error> {
+    let version = [b'E', b'X', b'A', b'F', 1, 0];
     output.write_all(&version)?;
+    if let Some(header) = rows {
+        header.write_header(output)?;
+    } else {
+        // an empty header is a header with zero entries
+        output.write_all(&[0, 0])?;
+    }
     Ok(())
 }
 
@@ -408,13 +473,30 @@ impl HeaderBuilder {
     /// Add a variable length string to the header.
     fn add_str(&mut self, tag: u16, value: &str) -> Result<(), Error> {
         // the value is almost certainly not going to be this long
-        assert!(value.len() < 65536);
+        if value.len() > 65536 {
+            return Err(Error::InternalError("add_str value too long".into()));
+        }
         let tag_bytes = u16::to_be_bytes(tag);
         self.buffer.write_all(&tag_bytes)?;
         let value_bytes = value.as_bytes();
         let value_len = u16::to_be_bytes(value_bytes.len() as u16);
         self.buffer.write_all(&value_len)?;
         self.buffer.write_all(value_bytes)?;
+        self.row_count += 1;
+        Ok(())
+    }
+
+    /// Add a variable length slice of bytes to the header.
+    fn add_bytes(&mut self, tag: u16, value: &[u8]) -> Result<(), Error> {
+        // the value is almost certainly not going to be this long
+        if value.len() > 65536 {
+            return Err(Error::InternalError("add_bytes value too long".into()));
+        }
+        let tag_bytes = u16::to_be_bytes(tag);
+        self.buffer.write_all(&tag_bytes)?;
+        let value_len = u16::to_be_bytes(value.len() as u16);
+        self.buffer.write_all(&value_len)?;
+        self.buffer.write_all(value)?;
         self.row_count += 1;
         Ok(())
     }
@@ -429,19 +511,14 @@ impl HeaderBuilder {
 }
 
 // Build the manifest header and write the bytes to the output.
-fn write_manifest_header<W: Write>(
-    num_entries: u16,
-    block_size: usize,
-    output: W,
-) -> Result<(), Error> {
+fn make_manifest_header(num_entries: u32, block_size: usize) -> Result<HeaderBuilder, Error> {
     let mut header = HeaderBuilder::new();
-    header.add_u16(TAG_NUM_ENTRIES, num_entries)?;
+    header.add_u32(TAG_NUM_ENTRIES, num_entries)?;
     // compression algorithm is always Zstandard, for now
-    header.add_u8(TAG_COMP_ALGO, 1)?;
+    header.add_u8(TAG_COMP_ALGO, Compression::ZStandard.into())?;
     // block size will never larger than 2^32 bytes
     header.add_u32(TAG_BLOCK_SIZE, block_size as u32)?;
-    header.write_header(output)?;
-    Ok(())
+    Ok(header)
 }
 
 // Inject the metadata rows into the header.

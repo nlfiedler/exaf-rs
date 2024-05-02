@@ -49,6 +49,9 @@ pub enum Error {
     /// A header was missing a required tag row.
     #[error("missing required tag from header: {0}")]
     MissingTag(String),
+    /// A usage error
+    #[error("error: {0}")]
+    Usage(String),
     /// An unexpected error occurred that would otherwise have been a panic.
     #[error("something bad happened: {0}")]
     InternalError(String),
@@ -155,19 +158,109 @@ fn sanitize_path<P: AsRef<Path>>(dirty: P) -> Result<PathBuf, Error> {
 }
 
 ///
+/// Generate a salt appropriate for the given key derivation function.
+///
+fn generate_salt(kd: &KeyDerivation) -> Result<Vec<u8>, Error> {
+    if *kd == KeyDerivation::Argon2id {
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        let salt = SaltString::generate(&mut OsRng);
+        let mut buf: Vec<u8> = vec![0; salt.len()];
+        let bytes = salt
+            .decode_b64(&mut buf)
+            .map_err(|e| Error::InternalError(format!("argon2 failed: {}", e)))?;
+        Ok(bytes.to_vec())
+    } else {
+        // something went terribly wrong
+        Err(Error::UnsupportedKeyAlgo(255))
+    }
+}
+
+///
+/// Produce a secret key from a passphrase and random salt.
+///
+fn derive_key(kd: &KeyDerivation, password: &str, salt: &[u8]) -> Result<Vec<u8>, Error> {
+    if *kd == KeyDerivation::Argon2id {
+        use argon2::Argon2;
+        let mut output_key_material = [0u8; 32];
+        Argon2::default()
+            .hash_password_into(password.as_bytes(), salt, &mut output_key_material)
+            .map_err(|e| Error::InternalError(format!("argon2 failed: {}", e)))?;
+        Ok(output_key_material.to_vec())
+    } else {
+        // something went terribly wrong
+        Err(Error::UnsupportedKeyAlgo(255))
+    }
+}
+
+///
+/// Encrypt the given data, returning a newly allocated vector of bytes
+/// containing the cipher text, and the nonce that was generated.
+///
+fn encrypt_data(ea: &Encryption, key: &[u8], data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
+    if *ea == Encryption::AES256GCM {
+        use aes_gcm::{
+            aead::{Aead, AeadCore, KeyInit, OsRng},
+            Aes256Gcm, Key,
+        };
+        let key: &Key<Aes256Gcm> = key.into();
+        let cipher = Aes256Gcm::new(&key);
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let ciphertext = cipher
+            .encrypt(&nonce, data)
+            .map_err(|e| Error::InternalError(format!("aes_gcm failed: {}", e)))?;
+        Ok((ciphertext, nonce.to_vec()))
+    } else {
+        // something went terribly wrong
+        Err(Error::UnsupportedEncAlgo(255))
+    }
+}
+
+///
+/// Decrypt the given data, returning a newly allocated vector of bytes
+/// containing the plain text.
+///
+fn decrypt_data(ea: &Encryption, key: &[u8], data: &[u8], nonce: &[u8]) -> Result<Vec<u8>, Error> {
+    if *ea == Encryption::AES256GCM {
+        use aes_gcm::{
+            aead::{generic_array::GenericArray, Aead, AeadCore, KeyInit},
+            Aes256Gcm, Key,
+        };
+        let key: &Key<Aes256Gcm> = key.into();
+        let cipher = Aes256Gcm::new(&key);
+        let nonce: &GenericArray<u8, <Aes256Gcm as AeadCore>::NonceSize> = nonce.into();
+        let plaintext = cipher
+            .decrypt(&nonce, data)
+            .map_err(|e| Error::InternalError(format!("aes_gcm failed: {}", e)))?;
+        Ok(plaintext)
+    } else {
+        // something went terribly wrong
+        Err(Error::UnsupportedEncAlgo(255))
+    }
+}
+
+///
 /// Type of compression used on a specific content block.
 ///
 #[derive(Clone, Debug, PartialEq)]
 enum Compression {
-    Copy,
+    None,
     ZStandard,
 }
 
 impl fmt::Display for Compression {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Compression::Copy => write!(f, "copy"),
+            Compression::None => write!(f, "none"),
             Compression::ZStandard => write!(f, "zstd"),
+        }
+    }
+}
+
+impl Into<u8> for Compression {
+    fn into(self) -> u8 {
+        match self {
+            Compression::None => 0,
+            Compression::ZStandard => 1,
         }
     }
 }
@@ -177,7 +270,7 @@ impl TryFrom<u8> for Compression {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            0 => Ok(Compression::Copy),
+            0 => Ok(Compression::None),
             1 => Ok(Compression::ZStandard),
             v => Err(self::Error::UnsupportedCompAlgo(v)),
         }
@@ -188,16 +281,25 @@ impl TryFrom<u8> for Compression {
 /// Algorithm for encrypting the archive data.
 ///
 #[derive(Clone, Debug, PartialEq)]
-enum Encryption {
+pub enum Encryption {
     None,
-    Blowfish,
+    AES256GCM,
 }
 
 impl fmt::Display for Encryption {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Encryption::None => write!(f, "none"),
-            Encryption::Blowfish => write!(f, "Blowfish"),
+            Encryption::AES256GCM => write!(f, "AES256GCM"),
+        }
+    }
+}
+
+impl Into<u8> for Encryption {
+    fn into(self) -> u8 {
+        match self {
+            Encryption::None => 0,
+            Encryption::AES256GCM => 1,
         }
     }
 }
@@ -208,7 +310,7 @@ impl TryFrom<u8> for Encryption {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(Encryption::None),
-            1 => Ok(Encryption::Blowfish),
+            1 => Ok(Encryption::AES256GCM),
             v => Err(self::Error::UnsupportedEncAlgo(v)),
         }
     }
@@ -218,7 +320,7 @@ impl TryFrom<u8> for Encryption {
 /// Algorithm for deriving a key from a passphrase.
 ///
 #[derive(Clone, Debug, PartialEq)]
-enum KeyDerivation {
+pub enum KeyDerivation {
     None,
     Argon2id,
 }
@@ -228,6 +330,15 @@ impl fmt::Display for KeyDerivation {
         match self {
             KeyDerivation::None => write!(f, "none"),
             KeyDerivation::Argon2id => write!(f, "Argon2id"),
+        }
+    }
+}
+
+impl Into<u8> for KeyDerivation {
+    fn into(self) -> u8 {
+        match self {
+            KeyDerivation::None => 0,
+            KeyDerivation::Argon2id => 1,
         }
     }
 }
@@ -413,6 +524,10 @@ const TAG_CONTENT_POS: u16 = 0x4350;
 const TAG_ITEM_SIZE: u16 = 0x535a;
 const TAG_SYM_LINK: u16 = 0x534c;
 
+// tags for encryption header rows
+const TAG_INIT_VECTOR: u16 = 0x4956;
+const TAG_ENCRYPTED_SIZE: u16 = 0x4553;
+
 // Desired size of the compressed bundle of file data.
 const BUNDLE_SIZE: u64 = 16777216;
 
@@ -449,6 +564,47 @@ mod tests {
 
         let result = sanitize_path(Path::new("/usr/../src/./lib.rs"))?;
         assert_eq!(result, PathBuf::from("usr/src/lib.rs"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_generate_salt() -> Result<(), Error> {
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        let salt = SaltString::generate(&mut OsRng);
+        let mut buf: Vec<u8> = vec![0; salt.len()];
+        let result = salt.decode_b64(&mut buf);
+        assert!(result.is_ok());
+        let bytes = result.unwrap();
+        assert_eq!(bytes.len(), 16);
+        Ok(())
+    }
+
+    #[test]
+    fn test_derive_key_argon2() -> Result<(), Error> {
+        let password = "keyboard cat";
+        let salt = generate_salt(&KeyDerivation::Argon2id)?;
+        let secret = derive_key(&KeyDerivation::Argon2id, password, &salt)?;
+        assert_eq!(secret.len(), 32);
+        assert_ne!(password.as_bytes(), secret.as_slice());
+        Ok(())
+    }
+
+    #[test]
+    fn test_encrypt_decrypt() -> Result<(), Error> {
+        let password = "keyboard cat";
+        let salt = generate_salt(&KeyDerivation::Argon2id)?;
+        let secret = derive_key(&KeyDerivation::Argon2id, password, &salt)?;
+        let input = "mary had a little lamb whose fleece was white as snow";
+        assert_eq!(input.len(), 53);
+        let (cipher, nonce) = encrypt_data(&Encryption::AES256GCM, &secret, input.as_bytes())?;
+        // the cipher text will be larger than the input due to the
+        // authentication tag, and possibly the encryption algorithm
+        assert_eq!(cipher.len(), 69);
+        // the nonce is usually around 12 bytes, not really important
+        assert_eq!(nonce.len(), 12);
+        let plain = decrypt_data(&Encryption::AES256GCM, &secret, &cipher, &nonce)?;
+        // the part that matters -- the data can make the roundtrip
+        assert_eq!(plain, input.as_bytes());
         Ok(())
     }
 }

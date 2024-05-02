@@ -2,10 +2,7 @@
 ** Considerations
 *** flexible, extensible format supporting optional fields of various lengths
 *** added content is appended to the end of the file
-*** can record metadata for files and directories when available
-*** numeric fields are network byte order (Big Endian)
-*** textual fields are UTF-8 encoded
-*** may include data checksums for verification
+*** can record metadata for files and directories if available from OS
 *** XML is flexible, supports complex data types
 *** JSON is smaller than XML, easy to parse
 *** EXIF style is compact (rows of 3-tuples, ranging in length from 5 to 65,539 bytes)
@@ -13,31 +10,31 @@
 ** Encrytion
 *** password is used to derive a key using one of various algorithms, typically with a salt
 *** derived key (aka secret) is used to perform symmetric-key encryption on the file data
-*** directory/file header data rows are encrypted to prevent listing of archive contents
+*** manifest header data is encrypted along with file content to prevent file listing
+*** each manifest/content pair will be encrypted with a unique nonce
 ** Basic header format
-*** Most elements are represented with a ~header~
+*** Nearly everything is represented with a ~header~
 *** Header starts with 2 bytes that indicate the number of rows (max 65,535)
 *** Each row has 2-byte tag + 2-byte size + N-byte value (max 65,535)
+*** An empty header is represented as two zero bytes (i.e. number of entries is =0=)
+*** Textual values are UTF-8 encoded
 *** Integer values will be serialized to the smallest number of bytes
+*** Tags, sizes, and numeric values are stored in network byte order (Big Endian)
 ** Archive header
 *** magic number, version, optional header
-| Offset | Size | Purpose                        |
-|--------+------+--------------------------------|
-|      0 |    4 | File signature ('EXAF')        |
-|      4 |    2 | format version (major/minor)   |
-|      6 |    2 | remaining header size in bytes |
-|      8 |    2 | optional field tag             |
-|     10 |    2 | optional field size in bytes   |
-|     12 |    n | optional field value           |
-|    ... |  ... | ...                            |
+| Offset | Size | Purpose                      |
+|--------+------+------------------------------|
+|      0 |    4 | File signature ('EXAF')      |
+|      4 |    2 | format version (major/minor) |
+|      6 |    2 | number of  header rows       |
 *** fields related to encryption
-| Tag  | Purpose                                   |
-|------+-------------------------------------------|
-| 'EA' | encryption algorithm (AES, Blowfish, etc) |
-| 'KD' | key derivation algorithm (i.e. Argon2id)  |
-| 'SA' | random salt for encrypting password       |
-| 'KI' | number of iterations depending on KDF     |
-*** 1 or more manifests of files and directories starts after header
+| Tag  | Purpose                                  | Max Size | Type |
+|------+------------------------------------------+----------+------|
+| 'EA' | encryption algorithm (e.g. AES)          |        1 | u8   |
+| 'KD' | key derivation algorithm (e.g. Argon2id) |        1 | u8   |
+| 'SA' | random salt for encrypting password      |     vary | [u8] |
+| 'KI' | optional number of iterations for KDF    |        4 | u32  |
+*** 1 or more manifests of files and directories starts after archive header
 ** Archive manifest structure
 *** starts with a small header that describes the rest of the manifest
 *** followed by 1 or more (up to 65,535) file/link/dir entries
@@ -47,23 +44,34 @@
 **** 2-byte size of the header in bytes followed by header rows
 **** header size is for the following fields, not the entire set of entries
 **** fields
-| Tag  | Size | Description                     |
-|------+------+---------------------------------|
-| 'NE' | vary | number of entries in this block |
-| 'CA' | vary | compression algorithm ('ZSTD')  |
-| 'BS' | vary | block size in bytes             |
+| Tag  | Description                     | Max Size | Type |
+|------+---------------------------------+----------+------|
+| 'NE' | number of entries in this block |        4 | u32  |
+| 'CA' | compression algorithm ('ZSTD')  |        1 | u8   |
+| 'BS' | block size in bytes             |        4 | u32  |
 **** file/directory entries follow (2-byte entry size, header rows)
 **** additional tags for stored content (files and symbolic links)
-| Tag  | Size | Description                                   |
-|------+------+-----------------------------------------------|
-| 'IP' | vary | item position: offset within file             |
-| 'CP' | vary | content position: offset within content block |
-| 'SZ' | vary | size in bytes of this piece of the file       |
+| Tag  | Description                                   | Max Size | Type |
+|------+-----------------------------------------------+----------+------|
+| 'IP' | item position: offset within file             |        8 | u64  |
+| 'CP' | content position: offset within content block |        4 | u32  |
+| 'SZ' | size in bytes of this piece of the file       |        4 | u32  |
+** Encrypted manifest+content structure
+*** an encrypted archive will have both the manifest and its content encrypted as a single ~message~
+*** cipher text will be preceded by a header that gives enough information to read the block and decrypt
+*** secret key will be the user-provided passphrase, with salt, run through the KDF
+*** fields
+| Tag  | Description                   | Max Size | Type |
+|------+-------------------------------+----------+------|
+| 'IV' | initialization vector (nonce) | ?        | [u8] |
+| 'ES' | byte size of the cipher text  | 4        | u32  |
+*** the =IV= will typically be 12 to 16 bytes of data
 ** Archive entry considerations
 *** directory entries are optional, but must appear before any entries that refer to them
 *** duplicate directory entries are permissible for easier addition of files
 ** Archive entry structure
-*** all file paths and names are UTF-8 encoded
+*** all file/link/directory names are UTF-8 encoded
+*** full file paths are _not_ recorded, parents are referenced by unique identifier
 *** entry date/time is ~Unix time~ (seconds since the epoch) as 32 or 64 bits
 **** https://en.wikipedia.org/wiki/Unix_time
 **** length of the field will be either 4 (32 bits) or 8 (64 bits)
@@ -75,66 +83,70 @@
 *** file entries will refer to the containing directory by its identifier
 *** nested directories will refer to their parent directory by the unique id
 *** fields
-| Tag  | Size   | Purpose                             | Required? |
-|------+--------+-------------------------------------+-----------|
-| 'ID' | vary   | Unique identifier                   | yes       |
-| 'NM' | vary   | name of directory                   | yes       |
-| 'PA' | vary   | identifier of parent directory      |           |
-| 'MO' | vary   | Unix mode                           |           |
-| 'FA' | vary   | Windows file attributes             |           |
-| 'MT' | 4 or 8 | modification date/time as Unix time |           |
-| 'CT' | 4 or 8 | creation date/time as Unix time     |           |
-| 'AT' | 4 or 8 | access date/time as Unix time       |           |
-| 'UN' | vary   | name of FS owner                    |           |
-| 'UI' | vary   | user identifier                     |           |
-| 'GN' | vary   | name of FS group                    |           |
-| 'GI' | vary   | group identifier                    |           |
+| Tag  | Max Size | Purpose                             | Required? | Type |
+|------+----------+-------------------------------------+-----------+------|
+| 'ID' |        4 | Unique identifier                   | yes       | u32  |
+| 'NM' |     vary | name of directory                   | yes       | str  |
+| 'PA' |        4 | identifier of parent directory      |           | u32  |
+| 'MO' |        4 | Unix mode                           |           | u32  |
+| 'FA' |        4 | Windows file attributes             |           | u32  |
+| 'MT' |        8 | modification date/time as Unix time |           | i64  |
+| 'CT' |        8 | creation date/time as Unix time     |           | i64  |
+| 'AT' |        8 | access date/time as Unix time       |           | i64  |
+| 'UN' |     vary | name of FS owner                    |           | str  |
+| 'UI' |        4 | user identifier                     |           | u32  |
+| 'GN' |     vary | name of FS group                    |           | str  |
+| 'GI' |        4 | group identifier                    |           | u32  |
 ** Archive entry representing a file
 *** fields
-| Tag  | Size   | Purpose                             | Required? |
-|------+--------+-------------------------------------+-----------|
-| 'NM' | vary   | name of file                        | yes       |
-| 'PA' | vary   | identifier of parent directory      |           |
-| 'MO' | vary   | Unix mode                           |           |
-| 'FA' | vary   | Windows file attributes             |           |
-| 'HA' | vary   | hash digest algorithm               |           |
-| 'CS' | vary   | hash digest of original data        |           |
-| 'MT' | 4 or 8 | modification date/time as Unix time |           |
-| 'CT' | 4 or 8 | creation date/time as Unix time     |           |
-| 'AT' | 4 or 8 | access date/time as Unix time       |           |
-| 'UN' | vary   | user name                           |           |
-| 'UI' | vary   | user identifier                     |           |
-| 'GN' | vary   | group name                          |           |
-| 'GI' | vary   | group identifier                    |           |
+| Tag  | Max Size | Purpose                             | Required? | Type |
+|------+----------+-------------------------------------+-----------+------|
+| 'NM' |     vary | name of file                        | yes       | str  |
+| 'PA' |        4 | identifier of parent directory      |           | u32  |
+| 'MO' |        4 | Unix mode                           |           | u32  |
+| 'FA' |        4 | Windows file attributes             |           | u32  |
+| 'MT' |        8 | modification date/time as Unix time |           | i64  |
+| 'CT' |        8 | creation date/time as Unix time     |           | i64  |
+| 'AT' |        8 | access date/time as Unix time       |           | i64  |
+| 'UN' |     vary | user name                           |           | str  |
+| 'UI' |        4 | user identifier                     |           | u32  |
+| 'GN' |     vary | group name                          |           | str  |
+| 'GI' |        4 | group identifier                    |           | u32  |
 ** Archive entry representing a symbolic link
 *** typically symbolic links do not have metadata, depends on OS
 *** fields
-| Tag  | Size | Purpose                        | Required? |
-|------+------+--------------------------------+-----------|
-| 'SL' | vary | name of symbolic link          | yes       |
-| 'PA' | vary | identifier of parent directory |           |
+| Tag  | Max Size | Purpose                        | Required? | Type |
+|------+----------+--------------------------------+-----------+------|
+| 'SL' | vary     | name of symbolic link          | yes       | str  |
+| 'PA' | 4        | identifier of parent directory |           | u32  |
 * Action Plan
 ** TODO document the basic format
-** TODO check if compressed block is smaller, otherwise keep original data
-** TODO pack builder can never store more than 65,535 files in a single block
+** TODO experiment with different bundle size values (8, 16, 32, 64)
+** TODO consider the versioned reader API and if it helps
 ** TODO implement =Reader.entries()= that returns an iterator
 ** TODO add an =unpack()= to the iterator item
 *** =unpack()= should work for files, links, and directories
 ** TODO add =extract_all()= to =Reader=
+** TODO add =extract_one()= to =Reader= that will extract a file, link, or directory
 ** TODO test: unit tests for =HeaderBuilder= and its number downsizing
+*** output a zero-length header; should output =0x0000=
 ** TODO test: unit tests for all of the =get_header_*()= functions (number upsizing)
 ** TODO test: unit test that creates and extracts the =tiny_tree= set
 ** TODO test: unit tests for =read_link()=
 ** TODO test: unit tests for =write_link()=
-** TODO encrypt file data after compression
-*** need to find a maintained crate, =sodiumoxide= is deprecated
-*** https://crates.io/crates/orion (MIT)
-** TODO encrypt header rows
+** TODO test: unit tests for enum types into/from helpers
 ** TODO store metadata if option is given
 *** if ~itempos~ is non-zero, file metadata should not be serialized to the block
 ** TODO adding new files to an archive needs to determine the highest unique identifier of the existing directories
-** TODO set file/dir/link MT, AT, CT, mode, owners, etc on extract
+** TODO set file/dir/link MT, AT, CT, mode, owners, etc on extract if option is given
+*** do not do this by default, it almost certainly wouldn't work anyway
 ** TODO write examples
+** TODO find a way to implement =cargo install= for easy installation of the binary
+** TODO running =list= subcommand through =head= results in a ~broken pipe~ error
+** nice-to-have: usage errors should be displayed nicely
+** nice-to-have: include/exclude filters for create, list, and extract operations
+** nice-to-have: option to add ~associated data~ when encrypting file with AEAD
+** nice-to-have: check if compressed block is smaller, otherwise keep original data
 ** nice-to-have: sort incoming files by type (image vs text) to afford better compression
 *** if files of a similar nature are grouped together, compression should yield better results
 ** nice-to-have: retain extended file attributes
@@ -170,11 +182,11 @@
 ** Compression algorithms for consideration
 | Name  | Description              |
 |-------+--------------------------|
+| Copy  | No compression           |
 | ZSTD  | ZStandard                |
 | LZMA  | Improved version of LZ77 |
 | LZMA2 | Improved version of LZMA |
 | BZip2 | Standard BWT algorithm   |
-| Copy  | No compression method    |
 ** Key derivation functions for consideration
 *** from https://en.wikipedia.org/wiki/Key_derivation_function
 : In 2013 a Password Hashing Competition was announced to choose a new,
@@ -188,21 +200,8 @@
 - bcrypt for legacy systems
 - PBKDF2 if FIPS-140 compliance is required
 ** Symmetric-key algorithms for consideration
-- Twofish
-- Serpent
 - AES
 - Camellia
-- Salsa20
-- ChaCha20
-- Blowfish
-- CAST5
-- Kuznyechik
-- RC4
-- DES
-- 3DES
-- Skipjack
-- Safer
-- IDEA
 * Alternatives
 ** Pack
 *** https://github.com/PackOrganization/Pack
@@ -210,10 +209,11 @@
 *** written in Pascal with custom built Zstandard and SQLite
 ** zip
 *** https://users.cs.jmu.edu/buchhofp/forensics/formats/pkzip.html
-*** flawed encryption, irregular entry structure due to evolutionary growth
+*** flawed encryption
+*** slower compression speed and larger output size than others
 ** tar
 *** https://www.gnu.org/software/tar/manual/html_node/Standard.html
-*** there is much overhead per entry
+*** significant amount of overhead per entry
 *** compression of whole file makes random access inefficient
 ** 7-zip
 *** https://www.7-zip.org
@@ -221,5 +221,5 @@
 *** does not store file permissions
 ** xar
 *** https://en.wikipedia.org/wiki/Xar_(archiver)
-*** not widely available
 *** suitable for packages and application deliverables
+*** not widely available

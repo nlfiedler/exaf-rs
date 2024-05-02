@@ -14,28 +14,14 @@ use std::path::Path;
 ///
 trait VersionedReader {
     // Read the header starting at the current position.
-    fn read_next_header(&mut self) -> Result<HeaderMapV1, Error>;
+    fn read_next_header(&mut self) -> Result<HeaderMap, Error>;
 
     // Skip some content in the input stream (such as compressed content).
     fn skip_n_bytes(&mut self, skip: u32) -> Result<(), Error>;
 
     // Read the given number of bytes into a new vector.
     fn read_n_bytes(&mut self, count: u64) -> Result<Vec<u8>, Error>;
-
-    // TODO: add entries() that will read the archive header if it hasn't been read already,
-    //       then read each maniftest in turn, returning the entries as they are encountered
-    fn entries(&mut self) -> Result<Entries, Error>;
-
-    // TODO: add extract_all() that will read the archive header if it hasn't been read already,
-    //       then read each maniftest in turn, creating directories, files, and links along the way
 }
-
-// TODO: Entries can be basically versionless and rely on VersionedReader to process input
-pub struct Entries {}
-
-// impl Iterator for Entries {
-//     type Item = Result<Entry, Error>;
-// }
 
 //
 // Helper for building up the full path for entries in the archive.
@@ -93,13 +79,13 @@ pub fn list_entries(input: &mut Reader) -> Result<(), Error> {
     // loop until the end of the file is reached
     loop {
         // try to read the next manifest header, if any
-        match input.read_next_header() {
-            Ok(manifest_rows) => {
-                let manifest = ManifestV1::try_from(manifest_rows)?;
-
+        match input.read_next_manifest()? {
+            Some(manifest) => {
+                let block = input.read_content()?;
+                let mut cursor = std::io::Cursor::new(&block);
                 // read manifest.num_entries entries and list them
                 for _ in 0..manifest.num_entries {
-                    let entry_rows = input.read_next_header()?;
+                    let entry_rows = read_header(&mut cursor)?;
                     let entry = Entry::try_from(entry_rows)?;
                     if let Some(dir_id) = entry.dir_id {
                         let entry_parent = entry.parent.unwrap_or(0);
@@ -113,23 +99,8 @@ pub fn list_entries(input: &mut Reader) -> Result<(), Error> {
                         println!("{}", entry.name);
                     }
                 }
-
-                // skip over the file content, continue with the next manifest header
-                input.skip_n_bytes(manifest.block_size)?;
             }
-            Err(err) => {
-                return match err {
-                    Error::UnexpectedEof => Ok(()),
-                    Error::IOError(ioerr) => {
-                        if ioerr.kind() == ErrorKind::UnexpectedEof {
-                            Ok(())
-                        } else {
-                            Err(Error::from(ioerr))
-                        }
-                    }
-                    _ => Err(Error::from(err)),
-                }
-            }
+            None => return Ok(()),
         }
     }
 }
@@ -147,10 +118,10 @@ struct OutboundContent {
     kind: Kind,
 }
 
-impl TryFrom<HeaderMapV1> for OutboundContent {
+impl TryFrom<HeaderMap> for OutboundContent {
     type Error = super::Error;
 
-    fn try_from(value: HeaderMapV1) -> Result<Self, Self::Error> {
+    fn try_from(value: HeaderMap) -> Result<Self, Self::Error> {
         let kind: Kind = if get_header_str(&value, &TAG_NAME)?.is_some() {
             Kind::File
         } else if get_header_str(&value, &TAG_SYM_LINK)?.is_some() {
@@ -182,15 +153,14 @@ pub fn extract_entries(input: &mut Reader) -> Result<u64, Error> {
     // loop until the end of the file is reached
     loop {
         // try to read the next manifest header, if any
-        match input.read_next_header() {
-            Ok(manifest_rows) => {
-                let manifest = ManifestV1::try_from(manifest_rows)?;
-
+        match input.read_next_manifest()? {
+            Some(manifest) => {
                 // collect all files/links into a list to process them a bit later
                 let mut files: Vec<(OutboundContent, PathBuf)> = vec![];
-
+                let block = input.read_content()?;
+                let mut cursor = std::io::Cursor::new(&block);
                 for _ in 0..manifest.num_entries {
-                    let entry_rows = input.read_next_header()?;
+                    let entry_rows = read_header(&mut cursor)?;
                     let entry = Entry::try_from(entry_rows.clone())?;
                     if let Some(dir_id) = entry.dir_id {
                         let entry_parent = entry.parent.unwrap_or(0);
@@ -206,13 +176,29 @@ pub fn extract_entries(input: &mut Reader) -> Result<u64, Error> {
                         let fpath = super::sanitize_path(path)?;
                         fs::create_dir_all(fpath)?;
                     } else {
-                        let content = OutboundContent::try_from(entry_rows.clone())?;
-                        files.push((content, path));
+                        let oc = OutboundContent::try_from(entry_rows.clone())?;
+                        files.push((oc, path));
                     }
                 }
 
-                let content = input.read_n_bytes(manifest.block_size as u64)?;
-                zstd::stream::copy_decode(content.as_slice(), &mut buffer)?;
+                let mut taker = cursor.take(manifest.block_size as u64);
+                let mut content: Vec<u8> = vec![];
+                let bytes_read = taker.read_to_end(&mut content)? as u64;
+                if bytes_read != manifest.block_size as u64 {
+                    return Err(Error::UnexpectedEof);
+                }
+                // cursor = taker.into_inner();
+                if manifest.comp_algo == Compression::ZStandard {
+                    zstd::stream::copy_decode(content.as_slice(), &mut buffer)?;
+                } else {
+                    // the only remaining option is copy (keep the larger buffer
+                    // to optimize memory management)
+                    if buffer.len() > content.len() {
+                        buffer.extend(content.drain(..));
+                    } else {
+                        buffer = content;
+                    }
+                }
 
                 // process each of the outbound content elements
                 for (entry, path) in files.iter() {
@@ -229,10 +215,10 @@ pub fn extract_entries(input: &mut Reader) -> Result<u64, Error> {
                             // just created a new file, count it
                             file_count += 1;
                         }
-                        // if the file was an empty file, then we are already done here
+                        // if the file was an empty file, then we are already done
                         if entry.size > 0 {
                             // ensure the file has the appropriate length for writing this
-                            // content chunk into the file, extending it as necessary
+                            // content chunk into the file, extending it if necessary
                             if file_len < entry.itempos {
                                 output.set_len(entry.itempos)?;
                             }
@@ -257,28 +243,17 @@ pub fn extract_entries(input: &mut Reader) -> Result<u64, Error> {
                 }
                 buffer.clear();
             }
-            Err(err) => {
-                return match err {
-                    Error::UnexpectedEof => Ok(file_count),
-                    Error::IOError(ioerr) => {
-                        if ioerr.kind() == ErrorKind::UnexpectedEof {
-                            Ok(file_count)
-                        } else {
-                            Err(Error::from(ioerr))
-                        }
-                    }
-                    _ => Err(Error::from(err)),
-                }
-            }
+            None => return Ok(file_count),
         }
     }
 }
 
-type HeaderMapV1 = HashMap<u16, Vec<u8>>;
+/// Raw header rows consisting of the tags and values without interpretation.
+pub type HeaderMap = HashMap<u16, Vec<u8>>;
 
 // Read a complete header from the stream.
-fn read_header_v1<R: Read>(mut input: R) -> Result<HeaderMapV1, Error> {
-    let mut rows: HeaderMapV1 = HashMap::new();
+fn read_header<R: Read>(mut input: R) -> Result<HeaderMap, Error> {
+    let mut rows: HeaderMap = HashMap::new();
     // read in the number of rows in this header
     let mut row_count_bytes = [0; 2];
     input.read_exact(&mut row_count_bytes)?;
@@ -303,7 +278,7 @@ fn read_header_v1<R: Read>(mut input: R) -> Result<HeaderMapV1, Error> {
     Ok(rows)
 }
 
-fn get_header_str(rows: &HeaderMapV1, key: &u16) -> Result<Option<String>, Error> {
+fn get_header_str(rows: &HeaderMap, key: &u16) -> Result<Option<String>, Error> {
     if let Some(row) = rows.get(key) {
         let s = String::from_utf8(row.to_owned())?;
         Ok(Some(s))
@@ -312,7 +287,7 @@ fn get_header_str(rows: &HeaderMapV1, key: &u16) -> Result<Option<String>, Error
     }
 }
 
-fn get_header_u8(rows: &HeaderMapV1, key: &u16) -> Result<Option<u8>, Error> {
+fn get_header_u8(rows: &HeaderMap, key: &u16) -> Result<Option<u8>, Error> {
     if let Some(row) = rows.get(key) {
         Ok(Some(row[0]))
     } else {
@@ -320,6 +295,7 @@ fn get_header_u8(rows: &HeaderMapV1, key: &u16) -> Result<Option<u8>, Error> {
     }
 }
 
+#[allow(dead_code)]
 fn pad_to_u16(row: &Vec<u8>) -> [u8; 2] {
     if row.len() == 1 {
         [0, row[0]]
@@ -328,7 +304,8 @@ fn pad_to_u16(row: &Vec<u8>) -> [u8; 2] {
     }
 }
 
-fn get_header_u16(rows: &HeaderMapV1, key: &u16) -> Result<Option<u16>, Error> {
+#[allow(dead_code)]
+fn get_header_u16(rows: &HeaderMap, key: &u16) -> Result<Option<u16>, Error> {
     if let Some(row) = rows.get(key) {
         let raw: [u8; 2] = pad_to_u16(row);
         let v = u16::from_be_bytes(raw);
@@ -348,7 +325,7 @@ fn pad_to_u32(row: &Vec<u8>) -> [u8; 4] {
     }
 }
 
-fn get_header_u32(rows: &HeaderMapV1, key: &u16) -> Result<Option<u32>, Error> {
+fn get_header_u32(rows: &HeaderMap, key: &u16) -> Result<Option<u32>, Error> {
     if let Some(row) = rows.get(key) {
         let raw: [u8; 4] = pad_to_u32(row);
         let v = u32::from_be_bytes(raw);
@@ -372,7 +349,7 @@ fn pad_to_u64(row: &Vec<u8>) -> [u8; 8] {
     }
 }
 
-fn get_header_u64(rows: &HeaderMapV1, key: &u16) -> Result<Option<u64>, Error> {
+fn get_header_u64(rows: &HeaderMap, key: &u16) -> Result<Option<u64>, Error> {
     if let Some(row) = rows.get(key) {
         let raw: [u8; 8] = pad_to_u64(row);
         let v = u64::from_be_bytes(raw);
@@ -382,7 +359,7 @@ fn get_header_u64(rows: &HeaderMapV1, key: &u16) -> Result<Option<u64>, Error> {
     }
 }
 
-fn get_header_time(rows: &HeaderMapV1, key: &u16) -> Result<Option<DateTime<Utc>>, Error> {
+fn get_header_time(rows: &HeaderMap, key: &u16) -> Result<Option<DateTime<Utc>>, Error> {
     if let Some(row) = rows.get(key) {
         if row.len() == 4 {
             let raw: [u8; 4] = row[0..4].try_into()?;
@@ -398,7 +375,7 @@ fn get_header_time(rows: &HeaderMapV1, key: &u16) -> Result<Option<DateTime<Utc>
     }
 }
 
-fn get_header_bytes(rows: &HeaderMapV1, key: &u16) -> Result<Option<Vec<u8>>, Error> {
+fn get_header_bytes(rows: &HeaderMap, key: &u16) -> Result<Option<Vec<u8>>, Error> {
     if let Some(row) = rows.get(key) {
         Ok(Some(row.to_owned()))
     } else {
@@ -421,14 +398,14 @@ pub struct ArchiveHeader {
     key_iter: Option<u32>,
 }
 
-impl TryFrom<HeaderMapV1> for ArchiveHeader {
+impl TryFrom<HeaderMap> for ArchiveHeader {
     type Error = super::Error;
 
-    fn try_from(value: HeaderMapV1) -> Result<Self, Self::Error> {
-        let enc_num = get_header_u8(&value, &TAG_ENC_ALGO)?.unwrap_or(0);
-        let enc_algo = Encryption::try_from(enc_num)?;
-        let key_num = get_header_u8(&value, &TAG_KEY_DERIV)?.unwrap_or(0);
-        let key_algo = KeyDerivation::try_from(key_num)?;
+    fn try_from(value: HeaderMap) -> Result<Self, Self::Error> {
+        let enc_algo = get_header_u8(&value, &TAG_ENC_ALGO)?
+            .map_or(Ok(Encryption::None), |v| Encryption::try_from(v))?;
+        let key_algo = get_header_u8(&value, &TAG_KEY_DERIV)?
+            .map_or(Ok(KeyDerivation::None), |v| KeyDerivation::try_from(v))?;
         let salt = get_header_bytes(&value, &TAG_SALT)?;
         let key_iter = get_header_u32(&value, &TAG_KEY_ITER)?;
         Ok(Self {
@@ -440,10 +417,10 @@ impl TryFrom<HeaderMapV1> for ArchiveHeader {
     }
 }
 
-impl TryFrom<HeaderMapV1> for Entry {
+impl TryFrom<HeaderMap> for Entry {
     type Error = super::Error;
 
-    fn try_from(value: HeaderMapV1) -> Result<Self, Self::Error> {
+    fn try_from(value: HeaderMap) -> Result<Self, Self::Error> {
         let (is_link, name): (bool, String) = if let Some(nm) = get_header_str(&value, &TAG_NAME)? {
             (false, nm)
         } else if let Some(sl) = get_header_str(&value, &TAG_SYM_LINK)? {
@@ -484,16 +461,16 @@ impl TryFrom<HeaderMapV1> for Entry {
 /// Represents the properties related to a content block that holds one or more
 /// files (or parts of files).
 ///
-struct ManifestV1 {
+pub struct Manifest {
     /// Number of directory, file, or symbolic links in the content block.
-    num_entries: u16,
+    num_entries: u32,
     /// Compression algorithm for this content block.
     comp_algo: Compression,
     /// Size in bytes of the (compressed) content block.
     block_size: u32,
 }
 
-impl fmt::Display for ManifestV1 {
+impl fmt::Display for Manifest {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
@@ -503,11 +480,11 @@ impl fmt::Display for ManifestV1 {
     }
 }
 
-impl TryFrom<HeaderMapV1> for ManifestV1 {
+impl TryFrom<HeaderMap> for Manifest {
     type Error = super::Error;
 
-    fn try_from(value: HeaderMapV1) -> Result<Self, Self::Error> {
-        let num_entries = get_header_u16(&value, &TAG_NUM_ENTRIES)?
+    fn try_from(value: HeaderMap) -> Result<Self, Self::Error> {
+        let num_entries = get_header_u32(&value, &TAG_NUM_ENTRIES)?
             .ok_or_else(|| Error::MissingTag("NE".into()))?;
         let comp_num =
             get_header_u8(&value, &TAG_COMP_ALGO)?.ok_or_else(|| Error::MissingTag("CA".into()))?;
@@ -517,6 +494,28 @@ impl TryFrom<HeaderMapV1> for ManifestV1 {
         Ok(Self {
             num_entries,
             comp_algo,
+            block_size,
+        })
+    }
+}
+
+pub struct Encrypted {
+    // header.add_bytes(TAG_INIT_VECTOR, &nonce)?;
+    init_vector: Vec<u8>,
+    // header.add_u32(TAG_ENCRYPTED_SIZE, cipher.len() as u32)?;
+    block_size: u32,
+}
+
+impl TryFrom<HeaderMap> for Encrypted {
+    type Error = super::Error;
+
+    fn try_from(value: HeaderMap) -> Result<Self, Self::Error> {
+        let block_size = get_header_u32(&value, &TAG_ENCRYPTED_SIZE)?
+            .ok_or_else(|| Error::MissingTag("ES".into()))?;
+        let init_vector = get_header_bytes(&value, &TAG_INIT_VECTOR)?
+            .ok_or_else(|| Error::MissingTag("IV".into()))?;
+        Ok(Self {
+            init_vector,
             block_size,
         })
     }
@@ -535,9 +534,9 @@ impl<R: Read> ReaderV1<R> {
 }
 
 impl<R: Read + Seek> VersionedReader for ReaderV1<R> {
-    fn read_next_header(&mut self) -> Result<HeaderMapV1, Error> {
+    fn read_next_header(&mut self) -> Result<HeaderMap, Error> {
         let input = self.input.get_mut();
-        read_header_v1(input)
+        read_header(input)
     }
 
     fn skip_n_bytes(&mut self, skip: u32) -> Result<(), Error> {
@@ -556,11 +555,13 @@ impl<R: Read + Seek> VersionedReader for ReaderV1<R> {
         }
         Ok(content)
     }
-
-    fn entries(&mut self) -> Result<Entries, Error> {
-        Ok(Entries {})
-    }
 }
+
+pub struct Entries {}
+
+// impl Iterator for Entries {
+//     type Item = Result<Entry, Error>;
+// }
 
 #[allow(dead_code)]
 pub struct Reader {
@@ -568,22 +569,139 @@ pub struct Reader {
     reader: Box<dyn VersionedReader>,
     // archive header read from the input data
     header: ArchiveHeader,
+    // secret key for encrypting files, if encryption is enabled
+    secret_key: Option<Vec<u8>>,
+    // number of bytes to read for the block after the manifest (if none, the
+    // block has already been read)
+    next_block_size: Option<u32>,
+    // buffered content, if any (this includes entries and file content)
+    content: Option<Vec<u8>>,
 }
 
 impl Reader {
+    ///
     /// Create a new Reader with the given versioned reader.
+    ///
     fn new(mut input: Box<dyn VersionedReader>) -> Result<Self, Error> {
         let rows = input.read_next_header()?;
         let header = ArchiveHeader::try_from(rows)?;
         Ok(Self {
             reader: input,
             header,
+            secret_key: None,
+            next_block_size: None,
+            content: None,
         })
+    }
+
+    pub fn is_encrypted(&self) -> bool {
+        self.header.key_algo != KeyDerivation::None
+    }
+
+    ///
+    /// Enable encryption when reading the archive, using the given passphrase.
+    ///
+    pub fn enable_encryption(mut self, password: &str) -> Result<Self, Error> {
+        let kd = self.header.key_algo.clone();
+        if let Some(ref salt) = self.header.salt {
+            self.secret_key = Some(derive_key(&kd, password, salt)?);
+            Ok(self)
+        } else {
+            Err(Error::InternalError(
+                "called enable_encryption() on plain archive".into(),
+            ))
+        }
+    }
+
+    ///
+    /// Attempt to read the next manifest header from the archive.
+    ///
+    /// Returns `None` if the end of the file has been reached.
+    ///
+    /// If the archive is encrypted and `enable_encryption()` has been called,
+    /// then the encrypted block of entries and file content will be decrypted.
+    ///
+    /// To get the block of entry headers and file content, call
+    /// `read_content()` and subsequently call `read_header()` to get the
+    /// `Entry` records.
+    ///
+    /// N.B. Not calling `read_content()` will lead to problems.
+    ///
+    pub fn read_next_manifest(&mut self) -> Result<Option<Manifest>, Error> {
+        match self.reader.read_next_header() {
+            Ok(rows) => {
+                if rows.contains_key(&TAG_ENCRYPTED_SIZE) {
+                    // an encrypted block of entries and file data, must be
+                    // decrypted and the plain text content cached for later
+                    let encrypted = Encrypted::try_from(rows)?;
+                    let cipher = self.reader.read_n_bytes(encrypted.block_size as u64)?;
+                    if let Some(ref secret) = self.secret_key {
+                        let plain = decrypt_data(
+                            &self.header.enc_algo,
+                            secret,
+                            &cipher,
+                            &encrypted.init_vector,
+                        )?;
+                        let mut cursor = std::io::Cursor::new(&plain);
+                        let rows = read_header(&mut cursor)?;
+                        let manifest = Manifest::try_from(rows)?;
+                        let mut buffer: Vec<u8> = vec![];
+                        cursor.read_to_end(&mut buffer)?;
+                        self.content = Some(buffer);
+                        self.next_block_size = None;
+                        return Ok(Some(manifest));
+                    } else {
+                        return Err(Error::InternalError(
+                            "encrypted archive, call enable_encryption()".into(),
+                        ));
+                    }
+                } else {
+                    let manifest = Manifest::try_from(rows)?;
+                    // discard any previously cached content and set the next
+                    // block size so that we know to read the content
+                    self.next_block_size = Some(manifest.block_size);
+                    self.content = None;
+                    return Ok(Some(manifest));
+                }
+            }
+            Err(err) => {
+                return match err {
+                    Error::UnexpectedEof => Ok(None),
+                    Error::IOError(ioerr) => {
+                        if ioerr.kind() == ErrorKind::UnexpectedEof {
+                            Ok(None)
+                        } else {
+                            Err(Error::from(ioerr))
+                        }
+                    }
+                    _ => Err(Error::from(err)),
+                }
+            }
+        }
+    }
+
+    ///
+    /// Read the upcoming block of entries and content from the archive.
+    ///
+    /// The file data will be preceeded by `num_entries` of `Entry` records.
+    ///
+    /// N.B. Must call `read_next_header()` _before_ calling this function.
+    ///
+    pub fn read_content(&mut self) -> Result<Vec<u8>, Error> {
+        if let Some(content) = self.content.take() {
+            Ok(content)
+        } else if let Some(count) = self.next_block_size.take() {
+            self.reader.read_n_bytes(count as u64)
+        } else {
+            Err(Error::InternalError(
+                "should call read_next_manifest() first".into(),
+            ))
+        }
     }
 }
 
 impl VersionedReader for Reader {
-    fn read_next_header(&mut self) -> Result<HeaderMapV1, Error> {
+    fn read_next_header(&mut self) -> Result<HeaderMap, Error> {
         self.reader.read_next_header()
     }
 
@@ -593,10 +711,6 @@ impl VersionedReader for Reader {
 
     fn read_n_bytes(&mut self, count: u64) -> Result<Vec<u8>, Error> {
         self.reader.read_n_bytes(count)
-    }
-
-    fn entries(&mut self) -> Result<Entries, Error> {
-        Ok(Entries {})
     }
 }
 
@@ -625,11 +739,9 @@ mod tests {
     fn test_version1_reader_one_tiny_file() -> Result<(), Error> {
         let input_path = "test/fixtures/version1/one_tiny_file.exa";
         let mut reader = from_file(input_path)?;
-        let archive_hdr = reader.read_next_header()?;
-        assert!(archive_hdr.is_empty());
         let manifest_hdr = reader.read_next_header()?;
         assert_eq!(manifest_hdr.len(), 3);
-        let manifest = ManifestV1::try_from(manifest_hdr)?;
+        let manifest = Manifest::try_from(manifest_hdr)?;
         assert_eq!(manifest.num_entries, 1);
         assert_eq!(manifest.comp_algo, Compression::ZStandard);
         assert_eq!(manifest.block_size, 32);
@@ -637,7 +749,7 @@ mod tests {
     }
 
     #[test]
-    fn test_read_header_v1() -> Result<(), Error> {
+    fn test_read_header() -> Result<(), Error> {
         let raw_bytes: Vec<u8> = vec![
             0x00, 0x0a, 0x49, 0x44, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x4e, 0x4d, 0x00, 0x03,
             0x74, 0x6d, 0x70, 0x4d, 0x4f, 0x00, 0x04, 0x00, 0x00, 0x41, 0xed, 0x4d, 0x54, 0x00,
@@ -648,7 +760,7 @@ mod tests {
             0x00, 0x04, 0x00, 0x00, 0x01, 0xf5, 0x47, 0x49, 0x00, 0x04, 0x00, 0x00, 0x00, 0x14,
             0x00, 0x0b,
         ];
-        let rows = read_header_v1(raw_bytes.as_slice())?;
+        let rows = read_header(raw_bytes.as_slice())?;
         assert_eq!(rows.len(), 10);
         // no use trying to check all of the values as some of them are timestamps
         assert_eq!(rows.get(&TAG_DIRECTORY_ID), Some(vec![0, 0, 0, 1].as_ref()));

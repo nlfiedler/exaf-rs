@@ -11,7 +11,11 @@ use std::path::{Path, PathBuf};
 ///
 /// Returns the total number of files added to the archive.
 ///
-fn create_archive<P: AsRef<Path>>(archive: P, inputs: Vec<&PathBuf>) -> Result<u64, Error> {
+fn create_archive<P: AsRef<Path>>(
+    archive: P,
+    inputs: Vec<&PathBuf>,
+    passwd: Option<&str>,
+) -> Result<u64, Error> {
     let path_ref = archive.as_ref();
     let path = match path_ref.extension() {
         Some(_) => path_ref.to_path_buf(),
@@ -19,6 +23,13 @@ fn create_archive<P: AsRef<Path>>(archive: P, inputs: Vec<&PathBuf>) -> Result<u
     };
     let output = File::create(path)?;
     let mut builder = PackBuilder::new(output)?;
+    if let Some(password) = passwd {
+        builder = builder.enable_encryption(
+            exaf_rs::KeyDerivation::Argon2id,
+            exaf_rs::Encryption::AES256GCM,
+            password,
+        )?;
+    }
     let mut file_count: u64 = 0;
     for input in inputs {
         let metadata = input.metadata()?;
@@ -38,17 +49,35 @@ fn create_archive<P: AsRef<Path>>(archive: P, inputs: Vec<&PathBuf>) -> Result<u
 ///
 /// List all file entries in the archive in breadth-first order.
 ///
-fn list_contents<P: AsRef<Path>>(archive: P) -> Result<(), Error> {
+fn list_contents<P: AsRef<Path>>(archive: P, passwd: Option<&str>) -> Result<(), Error> {
     let mut reader = exaf_rs::reader::from_file(archive)?;
-    exaf_rs::reader::list_entries(&mut reader)
+    if reader.is_encrypted() && passwd.is_none() {
+        Err(Error::Usage(
+            "Archive is encrypted, use --password to provide one.".into(),
+        ))
+    } else {
+        if let Some(password) = passwd {
+            reader = reader.enable_encryption(password)?;
+        }
+        exaf_rs::reader::list_entries(&mut reader)
+    }
 }
 
 ///
 /// Extract all of the files from the archive.
 ///
-fn extract_contents<P: AsRef<Path>>(archive: P) -> Result<u64, Error> {
+fn extract_contents<P: AsRef<Path>>(archive: P, passwd: Option<&str>) -> Result<u64, Error> {
     let mut reader = exaf_rs::reader::from_file(archive)?;
-    exaf_rs::reader::extract_entries(&mut reader)
+    if reader.is_encrypted() && passwd.is_none() {
+        Err(Error::Usage(
+            "Archive is encrypted, use --password to provide one.".into(),
+        ))
+    } else {
+        if let Some(password) = passwd {
+            reader = reader.enable_encryption(password)?;
+        }
+        exaf_rs::reader::extract_entries(&mut reader)
+    }
 }
 
 fn cli() -> Command {
@@ -65,7 +94,8 @@ fn cli() -> Command {
                     arg!(<INPUTS> ... "Files to add to archive")
                         .value_parser(clap::value_parser!(PathBuf)),
                 )
-                .arg_required_else_help(true),
+                .arg_required_else_help(true)
+                .arg(arg!(--password <PASSWD> "Password for encrypting the archive.")),
         )
         .subcommand(
             Command::new("list")
@@ -75,7 +105,8 @@ fn cli() -> Command {
                     arg!(archive: <ARCHIVE> "File path specifying the archive to read from.")
                         .value_parser(clap::value_parser!(PathBuf)),
                 )
-                .arg_required_else_help(true),
+                .arg_required_else_help(true)
+                .arg(arg!(--password <PASSWD> "Password for decrypting the archive.")),
         )
         .subcommand(
             Command::new("extract")
@@ -85,7 +116,8 @@ fn cli() -> Command {
                     arg!(archive: <ARCHIVE> "File path specifying the archive to read from.")
                         .value_parser(clap::value_parser!(PathBuf)),
                 )
-                .arg_required_else_help(true),
+                .arg_required_else_help(true)
+                .arg(arg!(--password <PASSWD> "Password for decrypting the archive.")),
         )
 }
 
@@ -103,20 +135,29 @@ fn main() -> Result<(), Error> {
                 .into_iter()
                 .flatten()
                 .collect::<Vec<_>>();
-            let file_count = create_archive(archive, inputs)?;
+            let passwd = sub_matches
+                .get_one::<String>("password")
+                .map(|s| s.as_str());
+            let file_count = create_archive(archive, inputs, passwd)?;
             println!("Added {} files to {}", file_count, archive);
         }
         Some(("list", sub_matches)) => {
             let archive = sub_matches
                 .get_one::<PathBuf>("archive")
                 .unwrap_or(&default_archive_path);
-            list_contents(archive)?;
+            let passwd = sub_matches
+                .get_one::<String>("password")
+                .map(|s| s.as_str());
+            list_contents(archive, passwd)?;
         }
         Some(("extract", sub_matches)) => {
             let archive = sub_matches
                 .get_one::<PathBuf>("archive")
                 .unwrap_or(&default_archive_path);
-            let file_count = extract_contents(archive)?;
+            let passwd = sub_matches
+                .get_one::<String>("password")
+                .map(|s| s.as_str());
+            let file_count = extract_contents(archive, passwd)?;
             println!("Extracted {} files", file_count)
         }
         _ => unreachable!(),

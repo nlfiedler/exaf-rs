@@ -1,6 +1,6 @@
 # Exaf
 
-The EXtensible Archiver Format is intended to be used in compressing and archiving files. It offers an alternative to the well-known zip and 7-zip formats, with extensibility in mind. The running time is similar to that of GNU tar with Zstandard compression, and the resulting file size is very similar. It is much faster and the file size is considerably smaller than Info-Zip. While the file size is larger than that of 7-zip, the run time is much less.
+The EXtensible Archiver Format is intended to be used in compressing and archiving files. It offers an alternative to the well-known zip and 7-zip formats, with extensibility in mind. The running time is similar to that of GNU tar with Zstandard compression, and the resulting file size is very similar. It is much faster and the file size is considerably smaller than Info-Zip. While the file size is larger than that of 7-zip, the run time is much less. Encryption of both metadata and file content is implemented using the Argon2id key derivation function and an AEAD cipher that assures the data confidentiality and authenticity. See the [Encryption](#encryption) section below for more information.
 
 **This is a work in progress.** There is a basic working prototype and the format is, for the most part, settled and will be documented soon.
 
@@ -32,7 +32,7 @@ cargo test
 
 ### Creating, listing, extracting archives
 
-Start by creating an archive using the `create` subcommand. The example below assumes that you have downloaded something interesting into your `~/Downloads` directory.
+Start by creating an archive using the `create` command. The example below assumes that you have downloaded something interesting into your `~/Downloads` directory.
 
 ```shell
 $ cargo run -- create archive.exa ~/Downloads/httpd-2.4.59
@@ -64,8 +64,12 @@ $ cargo run -- extract archive.exa
 Extracted 3138 files from archive.exa
 ```
 
+## Encryption
+
+With the `--password <PASSWD>` option to the commands listed above, the archive can be encrypted using a passphrase. A secret key will be derived using the [Argon2id](https://en.wikipedia.org/wiki/Argon2) algorithm and a random salt (which is then stored in the archive header), and each run of content in the archive will be encrypted with that secret key and a unique nonce (stored in the header of each manifest) using the AES256-GCM [Authenticated Encryption with Associated Data](https://en.wikipedia.org/wiki/Authenticated_encryption) cipher. The encryption includes both the entry metadata as well as the compressed file content.
+
 ## Prior Art
 
 There are [many existing](https://en.wikipedia.org/wiki/List_of_archive_formats) archive formats, many of which have long since fallen out of common use. Those that remain are not without their shortcomings, such as poorly implemented encryption features, or vulnerability to compression factor exploits (*zip bomb*).
 
-The original motivation to start this project began when [O](https://github.com/OttoCoddo) announced the [pack](https://pack.ac) file format. They introduced a novel approach to the problem of archiving and compressing files while lamenting the general lack of progress in this area. My own Rust version of this can be found [here](https://github.com/nlfiedler/pack-rs). It's speed and output size are nearly identical to that of this project.
+The original motivation to start this project began when [O](https://github.com/OttoCoddo) announced the [pack](https://pack.ac) file format. They introduced a novel approach to the problem of archiving and compressing files while lamenting the general lack of progress in this area. A Rust version of this can be found [here](https://github.com/nlfiedler/pack-rs) -- it's speed and output size are nearly identical to that of this project.
