@@ -92,7 +92,8 @@ impl<W: Write + Seek> PackBuilder<W> {
         }
         self.encryption = ea.clone();
         let salt = generate_salt(&kd)?;
-        self.secret_key = Some(derive_key(&kd, password, &salt)?);
+        let params: KeyDerivationParams = Default::default();
+        self.secret_key = Some(derive_key(&kd, password, &salt, &params)?);
         // reset the output position and write out a new archive header that
         // includes the encryption information provided
         self.output.seek(SeekFrom::Start(0))?;

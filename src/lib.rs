@@ -178,14 +178,26 @@ fn generate_salt(kd: &KeyDerivation) -> Result<Vec<u8>, Error> {
 ///
 /// Produce a secret key from a passphrase and random salt.
 ///
-fn derive_key(kd: &KeyDerivation, password: &str, salt: &[u8]) -> Result<Vec<u8>, Error> {
+fn derive_key(
+    kd: &KeyDerivation,
+    password: &str,
+    salt: &[u8],
+    params: &KeyDerivationParams,
+) -> Result<Vec<u8>, Error> {
     if *kd == KeyDerivation::Argon2id {
-        use argon2::Argon2;
-        let mut output_key_material = [0u8; 32];
-        Argon2::default()
-            .hash_password_into(password.as_bytes(), salt, &mut output_key_material)
+        use argon2::{Algorithm, ParamsBuilder, Version};
+        let mut output: Vec<u8> = vec![0; params.tag_length as usize];
+        let mut builder: ParamsBuilder = ParamsBuilder::new();
+        builder.t_cost(params.time_cost);
+        builder.m_cost(params.mem_cost);
+        builder.p_cost(params.para_cost);
+        builder.output_len(params.tag_length as usize);
+        let kdf = builder
+            .context(Algorithm::Argon2id, Version::V0x13)
             .map_err(|e| Error::InternalError(format!("argon2 failed: {}", e)))?;
-        Ok(output_key_material.to_vec())
+        kdf.hash_password_into(password.as_bytes(), salt, &mut output.as_mut_slice())
+            .map_err(|e| Error::InternalError(format!("argon2 failed: {}", e)))?;
+        Ok(output)
     } else {
         // something went terribly wrong
         Err(Error::UnsupportedKeyAlgo(255))
@@ -356,6 +368,75 @@ impl TryFrom<u8> for KeyDerivation {
 }
 
 ///
+/// Parameters to be provided to the key derivation function. These are fairly
+/// common to most such functions.
+///
+pub struct KeyDerivationParams {
+    /// Number of iterations for key derivation function
+    time_cost: u32,
+    /// Number of 1 kb memory blocks for key derivation function
+    mem_cost: u32,
+    /// Degree of parallelism for key derivation function
+    para_cost: u32,
+    /// Output length for key derivation function
+    tag_length: u32,
+}
+
+impl KeyDerivationParams {
+    ///
+    /// Set the time cost from the optional value found in the archive.
+    ///
+    fn time_cost(mut self, time_cost: Option<u32>) -> Self {
+        if let Some(tc) = time_cost {
+            self.time_cost = tc;
+        }
+        self
+    }
+
+    ///
+    /// Set the memory cost from the optional value found in the archive.
+    ///
+    fn mem_cost(mut self, mem_cost: Option<u32>) -> Self {
+        if let Some(tc) = mem_cost {
+            self.mem_cost = tc;
+        }
+        self
+    }
+
+    ///
+    /// Set the degree of parallelism from the optional value found in the
+    /// archive.
+    ///
+    fn para_cost(mut self, para_cost: Option<u32>) -> Self {
+        if let Some(tc) = para_cost {
+            self.para_cost = tc;
+        }
+        self
+    }
+
+    ///
+    /// Set the output length from the optional value found in the archive.
+    ///
+    fn tag_length(mut self, tag_length: Option<u32>) -> Self {
+        if let Some(tc) = tag_length {
+            self.tag_length = tc;
+        }
+        self
+    }
+}
+
+impl Default for KeyDerivationParams {
+    fn default() -> Self {
+        Self {
+            time_cost: 2,
+            mem_cost: 19_456,
+            para_cost: 1,
+            tag_length: 32,
+        }
+    }
+}
+
+///
 /// Represents a file, directory, or symbolic link within an archive.
 ///
 pub struct Entry {
@@ -489,6 +570,9 @@ impl Entry {
     }
 }
 
+///
+/// The type of an entry that has content, such as a file or symbolic link.
+///
 #[derive(Debug, PartialEq)]
 pub enum Kind {
     File,
@@ -499,7 +583,10 @@ pub enum Kind {
 const TAG_ENC_ALGO: u16 = 0x4541;
 const TAG_KEY_DERIV: u16 = 0x4b44;
 const TAG_SALT: u16 = 0x5341;
-const TAG_KEY_ITER: u16 = 0x4b49;
+const TAG_TIME_COST: u16 = 0x5443;
+const TAG_MEM_COST: u16 = 0x4d43;
+const TAG_PARA_COST: u16 = 0x5043;
+const TAG_TAG_LENGTH: u16 = 0x544c;
 
 // tags for manifest header rows
 const TAG_NUM_ENTRIES: u16 = 0x4e45;
@@ -583,7 +670,8 @@ mod tests {
     fn test_derive_key_argon2() -> Result<(), Error> {
         let password = "keyboard cat";
         let salt = generate_salt(&KeyDerivation::Argon2id)?;
-        let secret = derive_key(&KeyDerivation::Argon2id, password, &salt)?;
+        let params: KeyDerivationParams = Default::default();
+        let secret = derive_key(&KeyDerivation::Argon2id, password, &salt, &params)?;
         assert_eq!(secret.len(), 32);
         assert_ne!(password.as_bytes(), secret.as_slice());
         Ok(())
@@ -593,7 +681,8 @@ mod tests {
     fn test_encrypt_decrypt() -> Result<(), Error> {
         let password = "keyboard cat";
         let salt = generate_salt(&KeyDerivation::Argon2id)?;
-        let secret = derive_key(&KeyDerivation::Argon2id, password, &salt)?;
+        let params: KeyDerivationParams = Default::default();
+        let secret = derive_key(&KeyDerivation::Argon2id, password, &salt, &params)?;
         let input = "mary had a little lamb whose fleece was white as snow";
         assert_eq!(input.len(), 53);
         let (cipher, nonce) = encrypt_data(&Encryption::AES256GCM, &secret, input.as_bytes())?;

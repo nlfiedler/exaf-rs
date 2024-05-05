@@ -4,21 +4,11 @@
 
 The basic file structure starts with a header that describes the file, followed by a table-of-contents (hereafter called _manifest_), followed by the (compressed) file data (_content_). The manifest describes the directories, files, and symbolic links that are recorded in the content. The file and link entries have additional fields that indicate where their content is stored within the content block. At a minimum there will be a header followed by one manifest and content block, but it is possible to have multiple manifest/content pairs, one following immediately after the other.
 
-```
-|----------------------|
-|    Archive header    |
-|----------------------|
-|       Manifest       |
-|----------------------|
-|       Content        |
-|----------------------|
-|       Manifest       |
-|----------------------|
-|       Content        |
-|----------------------|
-|         ...          |
-|----------------------|
-```
+| Section | Description |
+| ------- | ----------- |
+| Archive header | Magic number, version, optional attributes |
+| Manifest | Information on directories, files, and symbolic links in the following block of content |
+| Content | A large compressed blob of file data |
 
 The details of each portion of the archive are described in the sections below.
 
@@ -42,7 +32,7 @@ The high-level objectives are as follows:
 * It should support encryption using the best available algorithms and standards.
 * It should have as few limits as is reasonable (see [Limitations](#limitations) below).
 
-Concerning the potential choices for the format of metadata within the archive, several formats come to mind. Looking at something like [XAR](https://en.wikipedia.org/wiki/Xar_(archiver)), XML is flexible, humanly readable, and supports complex data types. Alternatively, JSON is smaller than XML and almost as expressive. Even more concise is something like the EXIF format that uses _tags_, _type_, and _count_ to record all sorts of values. A binary format that is very concise, [CBOR](https://cbor.io), is also a strong contender.
+Concerning the potential choices for the format of metadata within the archive, several formats come to mind. Looking at something like [XAR](https://en.wikipedia.org/wiki/Xar_(archiver)), it is clear that XML is flexible, humanly readable, and supports complex data types. Alternatively, JSON is smaller than XML and almost as expressive. Even more concise is something like the EXIF format that uses _tags_, _type_, and _count_ to record all sorts of values. A binary format that is very concise, [CBOR](https://cbor.io), is also a strong contender.
 
 At a higher level, the overall container format found in Pack is very interesting. It places a hard dependency on a third party (SQLite), and involves some very complex SQL queries, but it is fast and produces a pretty small archive. As we will soon see with CBOR, relying on SQLite means you **must** have access to a good library that provides everything you need from SQLite, and that can be a challenge.
 
@@ -79,6 +69,8 @@ A simple example follows, which contains 2 rows, one textual value and one numer
 |     18 | `0x01` | Low byte of 16-bit size of value in bytes |
 |     19 | `0x65` | The value, decimal number _101_ |
 
+Throughout this document, any _value_ that is shown as text can be assumed to be UTF-8 encoded. In the example above, the `N` and `M` tags are the hexadecimal values `0x4e` and `0x4d`, respectively.
+
 In the tables that detail the format in subsequent sections, the **Max Size** values indicate the maximum size of the row value. The purpose of this is to indicate the numeric precision for values that may be squashed to their smallest possible size. That is, what might normally be a 4-byte value can be written as a single byte if its value is less than 256. As such, the **size** of the value would be `0x0001` in the file but when parsed into memory it would be a 32-bit number. The `PA` row in the example above is an example of this squashing: the directory identifier should be a 32-bit number, but since this value was `101` it was serialized as a single byte.
 
 In the tables in subsequent sections, the **Type** labels are basically Rust types. A `u8` is an unsigned 8-bit number and a `u32` is an unsigned 32-bit number, while a `[u8]` is an array of unsigned 8-bit numbers. A `str` is a UTF-8 encoded string.
@@ -87,15 +79,18 @@ In the tables in subsequent sections, the **Type** labels are basically Rust typ
 
 Every Exaf archive starts with a magic number, version, and number of optional header rows.
 
-```
-|--------------------------------------------------------|
-| Offset |  0  |  1  |  2  |  3  |  4  |  5  |  6  |  7  |
-|--------------------------------------------------------|
-| Value  | 'E' | 'X' | 'A' | 'F' |  1  |  0  |  n  |  m  |
-|--------------------------------------------------------|
-```
+| Offset | Value |
+| ------ | ----- |
+|      0 |  `E`  |
+|      1 |  `X`  |
+|      2 |  `A`  |
+|      3 |  `F`  |
+|      4 | `0x01` |
+|      5 | `0x00` |
+|      6 | vary  |
+|      7 | vary  |
 
-* The first four bytes are the characters `EXAF` which act as the _magic number_ value.
+* The first four bytes are the UTF-8 encoded characters `EXAF` which act as the _magic number_ value.
 * Offsets 4 and 5 represent the **major** and **minor** version of the file format, initially 1.0.
 * Offsets 6 and 7 indicate the number of rows of tag/size/value tuples that follow.
     - If the archive header is empty, the bytes at offsets 6 and 7 will be `0`.
@@ -109,39 +104,25 @@ If the bytes at offsets 6 and 7 in the archive header are non-zero, then the row
 | `EA` | encryption algorithm (e.g. AES256-GCM)   |        1 | `u8`   |
 | `KD` | key derivation algorithm (e.g. Argon2id) |        1 | `u8`   |
 | `SA` | random salt used to derive the key       |     vary | `[u8]` |
-| `KI` | optional number of iterations for KDF    |        4 | `u32`  |
+| `TC` | optional number of iterations for KDF (_time cost_) | 4 | `u32` |
+| `MC` | optional number of 1kb memory blocks for KDF (_memory cost_) | 4 | `u32` |
+| `PC` | optional degree of parallelism for KDF (_parallelism cost_) | 4 | `u32` |
+| `TL` | optional number of bytes of output for KDF (_tag length_) | 4 | `u32` |
 
-The values for `EA` at this time are `0` for _none_ and `1` for the **AES256-GCM AEAD** cipher. Similarly, the `KD` can be `0` for _none_ and `1` for the **Argon2id** key derivation function (KDF). When creating an archive, rather than have `EA` or `KD` rows whose values are `0` it is better to simply elide the rows entirely as _none_ will be the default.
-
-The `SA` value length may vary but it will likely be around 12 or 16 bytes.
-
-For now, the `KI` row is simply reserved as the Argon2 Rust crate does not have an _iterations_ parameter. Nonetheless, a different implementation may take such an input and as such this header row would be useful.
+The encryption related rows are described in detail in the [Encryption](#encryption) section.
 
 ## Manifest and Content
 
-The manifest and content start immediately after the archive header. The manifest describes the files and directories (and symbolic links) that are contained in whole or in part in the content block that follows. The main objective of having a content block is to combine as much file content as it takes to fill a large buffer and then compress it. Compression is typically more effective with larger blocks of data. As such, the implementation contained in this repository combines files until it fills an in-memory buffer that is **16 megabytes** in size. Larger sizes can also work, but the results are often less than 1 percent smaller.
+The manifest and content start immediately after the archive header. The manifest describes the directories, files, and symbolic links that are contained in whole or in part in the content block that follows. The main objective of having a content block is to combine as much file content as it takes to fill a large buffer and then compress it. Compression is typically more effective with larger blocks of data. As such, the implementation contained in this repository combines files until it fills an in-memory buffer that is **16 megabytes** in size. Larger sizes can also work, but the results are often less than 1 percent smaller.
 
 Files that cannot fit within the remainder of a content block will be split into the next manifest/content pair. This is also true for very large files that exceed the size of the content block. The manifest entries will indicate what portion of a file is contained in the paired content block.
 
-```
-|-------------------------------------------|
-|  Manifest header with ~3 rows of values   |
-|-------------------------------------------|
-|  A directory entry, maybe                 |
-|-------------------------------------------|
-|  Maybe another directory entry, and so on |
-|-------------------------------------------|
-|  A file entry, probably has parent ref    |
-|-------------------------------------------|
-|  A file entry, probably has parent ref    |
-|-------------------------------------------|
-|  A file entry, probably has parent ref    |
-|-------------------------------------------|
-|  Finally, the actual file content all     |
-|  merged together into a single blob and   |
-|  compressed as one unit for efficiency.   |
-|-------------------------------------------|
-```
+| Section | Description |
+| ------- | ----------- |
+| Manifest header | Small header of about 3 rows that describes the rest of the manifest |
+| Directory entry | Optional directory entries that serve to contain other entries |
+| File/link entry | Entry that describes a file or symbolic link, probably belonging to a directory above |
+| Content | After possibly many directory/file/link entries, the content follows |
 
 The number of directory, file, and symlink entries in the manifest is indicated by a value in the manifest header, as described below. The manifest header also indicates what compression algorithm was used to compress the content, as well as the size in bytes of the content block.
 
@@ -163,7 +144,7 @@ The values for `CA` at this time are `0` for _none_ and `1` for [Zstandard](http
 
 ### Entries
 
-Following the short manifest header are one or more _entry_ headers. The number of entries is specified in the `NE` row of the manifest header and will never exceed 4,294,967,296, which should be enough for most use cases. Keep in mind that the `NE` limit is **per manifest**, not the archive overall. In theory, the archive could be extremely large. The only limiting factor to the archive size is that unique identifiers for directories are limited to 32 bits, so at most an archive could have 4,294,967,295 directories (`0` is not a valid identifier).
+Following the short manifest header are one or more _entry_ headers. The number of entries is specified in the `NE` row of the manifest header and will never exceed 4,294,967,295, which should be enough for most use cases. Keep in mind that the `NE` limit is **per manifest**, not the archive overall. In theory, the archive could be extremely large. The only limiting factor to the archive size is that unique identifiers for directories are limited to 32 bits, so at most an archive could have 4,294,967,295 directories (`0` is not a valid identifier).
 
 * Directory entries are optional, but should appear before any entries that refer to them.
 * Each directory entry is assigned a numeric identifier that is unique within the archive.
@@ -302,7 +283,18 @@ As a reminder, the archive header rows related to encryption are as follows:
 | `EA` | encryption algorithm (e.g. AES256-GCM)   |        1 | `u8`   |
 | `KD` | key derivation algorithm (e.g. Argon2id) |        1 | `u8`   |
 | `SA` | random salt used to derive the key       |     vary | `[u8]` |
-| `KI` | optional number of iterations for KDF    |        4 | `u32`  |
+| `TC` | optional number of iterations for KDF (_time cost_) | 4 | `u32` |
+| `MC` | optional number of 1kb memory blocks for KDF (_memory cost_) | 4 | `u32` |
+| `PC` | optional degree of parallelism for KDF (_parallelism cost_) | 4 | `u32` |
+| `TL` | optional number of bytes of output for KDF (_tag length_) | 4 | `u32` |
+
+The values for `EA` at this time are `0` for _none_ and `1` for the **AES256-GCM AEAD** cipher. Similarly, the `KD` can be `0` for _none_ and `1` for the **Argon2id** key derivation function (KDF). When creating an archive, rather than have `EA` or `KD` rows whose values are `0` it is better to simply elide the rows entirely as _none_ will be the default.
+
+The `SA` value length may vary but it will likely be around 16 bytes. The salt is stored as raw bytes, so if your library generates an encoded form (such as base64), you must decode it before storing in the `SA` header row.
+
+The three optional _cost_ rows are given as parameters to the key-derivation function. The `TC` value indicates the number of iterations, the `MC` value indicates the number of 1 kilobyte memory blocks to be used, and the `PC` value indicates the degree of parallelism. The **default** value for `TC` is `2`, the **default** for `MC` is `19,456`, and the **default** for `PC` is `1`. These defaults are recommended in OWASP's [password storage cheat sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html) and are the defaults in the [argon2](https://docs.rs/argon2/latest/argon2/) Rust crate.
+
+The `TL` row is a value that may be referred to as either the _output length_ or _tag length_, which indicates the number of bytes of desired output from the key derivation function. The **default** in the Argon2 Rust create is `32` and as such is the default for this format.
 
 The basic flow of encryption works like so:
 
@@ -334,13 +326,13 @@ The `IV` data will typically be 12 to 16 bytes in length.
 
 ## Limitations
 
-From the details above, we can see several limits:
+From the details above, we can infer several limits on the archive format:
 
 * The number of rows in a header is encoded as 16-bits, so a header can have at most 65,535 rows.
-* Header row sizes are encoded as 16-bits, so a row value can be 65,535 bytes at most.
+* Header row sizes are encoded as 16-bits, so a row value can have at most 65,535 bytes.
 * Algorithms are all encoded as 8-bits, limiting us to 255 compression algorithms, 255 encryption algorithms, and 255 key derivation functions.
 * File _item position_ (`IP`) values are encoding using 64-bits, limiting file sizes to around 18,446,744,073,709,551,615 bytes.
 * The number of iterations for the KDF is encoded using 32-bits, limiting us to 4,294,967,295 iterations.
 * Directory identifiers are encoded using 32-bits, so at most 4,294,967,295 directories can appear in a single archive.
 
-The content blocks have a size limit, but that is not relevant since the archive may have multiple content blocks.
+The content blocks have a size limit, but that is not relevant since the archive may have an unlimited number of content blocks.

@@ -17,7 +17,7 @@ trait VersionedReader {
     fn read_next_header(&mut self) -> Result<HeaderMap, Error>;
 
     // Skip some content in the input stream (such as compressed content).
-    fn skip_n_bytes(&mut self, skip: u32) -> Result<(), Error>;
+    // fn skip_n_bytes(&mut self, skip: u32) -> Result<(), Error>;
 
     // Read the given number of bytes into a new vector.
     fn read_n_bytes(&mut self, count: u64) -> Result<Vec<u8>, Error>;
@@ -30,7 +30,8 @@ struct PathBuilder {
     // directories encountered so far; key is ID, value is (PA, NM)
     // (if PA is zero, the entry is at the root of the tree)
     parents: HashMap<u32, (u32, String)>,
-    // full paths of the directory with the given identifier
+    // full paths of the directory with the given identifier; built lazily when
+    // get_full_path() is called
     full_paths: HashMap<u32, PathBuf>,
 }
 
@@ -394,8 +395,14 @@ pub struct ArchiveHeader {
     key_algo: KeyDerivation,
     /// Salt for deriving the key from a passphrase
     salt: Option<Vec<u8>>,
-    /// Number of iterations for the key derivation function
-    key_iter: Option<u32>,
+    /// Number of iterations for key derivation function
+    time_cost: Option<u32>,
+    /// Number of 1 kb memory blocks for key derivation function
+    mem_cost: Option<u32>,
+    /// Degree of parallelism for key derivation function
+    para_cost: Option<u32>,
+    /// Output length for key derivation function
+    tag_length: Option<u32>,
 }
 
 impl TryFrom<HeaderMap> for ArchiveHeader {
@@ -407,12 +414,18 @@ impl TryFrom<HeaderMap> for ArchiveHeader {
         let key_algo = get_header_u8(&value, &TAG_KEY_DERIV)?
             .map_or(Ok(KeyDerivation::None), |v| KeyDerivation::try_from(v))?;
         let salt = get_header_bytes(&value, &TAG_SALT)?;
-        let key_iter = get_header_u32(&value, &TAG_KEY_ITER)?;
+        let time_cost = get_header_u32(&value, &TAG_TIME_COST)?;
+        let mem_cost = get_header_u32(&value, &TAG_MEM_COST)?;
+        let para_cost = get_header_u32(&value, &TAG_PARA_COST)?;
+        let tag_length = get_header_u32(&value, &TAG_TAG_LENGTH)?;
         Ok(Self {
             enc_algo,
             key_algo,
             salt,
-            key_iter,
+            time_cost,
+            mem_cost,
+            para_cost,
+            tag_length,
         })
     }
 }
@@ -539,11 +552,11 @@ impl<R: Read + Seek> VersionedReader for ReaderV1<R> {
         read_header(input)
     }
 
-    fn skip_n_bytes(&mut self, skip: u32) -> Result<(), Error> {
-        let input = self.input.get_mut();
-        input.seek(SeekFrom::Current(skip as i64))?;
-        Ok(())
-    }
+    // fn skip_n_bytes(&mut self, skip: u32) -> Result<(), Error> {
+    //     let input = self.input.get_mut();
+    //     input.seek(SeekFrom::Current(skip as i64))?;
+    //     Ok(())
+    // }
 
     fn read_n_bytes(&mut self, count: u64) -> Result<Vec<u8>, Error> {
         let input = self.input.get_mut();
@@ -604,7 +617,12 @@ impl Reader {
     pub fn enable_encryption(mut self, password: &str) -> Result<Self, Error> {
         let kd = self.header.key_algo.clone();
         if let Some(ref salt) = self.header.salt {
-            self.secret_key = Some(derive_key(&kd, password, salt)?);
+            let mut params: KeyDerivationParams = Default::default();
+            params = params.time_cost(self.header.time_cost);
+            params = params.mem_cost(self.header.mem_cost);
+            params = params.para_cost(self.header.para_cost);
+            params = params.tag_length(self.header.tag_length);
+            self.secret_key = Some(derive_key(&kd, password, salt, &params)?);
             Ok(self)
         } else {
             Err(Error::InternalError(
@@ -705,9 +723,9 @@ impl VersionedReader for Reader {
         self.reader.read_next_header()
     }
 
-    fn skip_n_bytes(&mut self, skip: u32) -> Result<(), Error> {
-        self.reader.skip_n_bytes(skip)
-    }
+    // fn skip_n_bytes(&mut self, skip: u32) -> Result<(), Error> {
+    //     self.reader.skip_n_bytes(skip)
+    // }
 
     fn read_n_bytes(&mut self, count: u64) -> Result<Vec<u8>, Error> {
         self.reader.read_n_bytes(count)
