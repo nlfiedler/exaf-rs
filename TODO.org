@@ -1,127 +1,4 @@
-* Format
-** Considerations
-*** flexible, extensible format supporting optional fields of various lengths
-*** added content is appended to the end of the file
-*** can record metadata for files and directories if available from OS
-*** XML is flexible, supports complex data types
-*** JSON is smaller than XML, easy to parse
-*** EXIF style is compact (rows of 3-tuples, ranging in length from 5 to 65,539 bytes)
-*** CBOR is very compact but dependent on finding good implementations
-** Encrytion
-*** password is used to derive a key using one of various algorithms, typically with a salt
-*** derived key (aka secret) is used to perform symmetric-key encryption on the file data
-*** manifest header data is encrypted along with file content to prevent file listing
-*** each manifest/content pair will be encrypted with a unique nonce
-** Basic header format
-*** Nearly everything is represented with a ~header~
-*** Header starts with 2 bytes that indicate the number of rows (max 65,535)
-*** Each row has 2-byte tag + 2-byte size + N-byte value (max 65,535)
-*** An empty header is represented as two zero bytes (i.e. number of entries is =0=)
-*** Textual values are UTF-8 encoded
-*** Integer values will be serialized to the smallest number of bytes
-*** Tags, sizes, and numeric values are stored in network byte order (Big Endian)
-** Archive header
-*** magic number, version, optional header
-| Offset | Size | Purpose                      |
-|--------+------+------------------------------|
-|      0 |    4 | File signature ('EXAF')      |
-|      4 |    2 | format version (major/minor) |
-|      6 |    2 | number of  header rows       |
-*** fields related to encryption
-| Tag  | Purpose                                  | Max Size | Type |
-|------+------------------------------------------+----------+------|
-| 'EA' | encryption algorithm (e.g. AES)          |        1 | u8   |
-| 'KD' | key derivation algorithm (e.g. Argon2id) |        1 | u8   |
-| 'SA' | random salt for encrypting password      |     vary | [u8] |
-| 'KI' | optional number of iterations for KDF    |        4 | u32  |
-*** 1 or more manifests of files and directories starts after archive header
-** Archive manifest structure
-*** starts with a small header that describes the rest of the manifest
-*** followed by 1 or more (up to 65,535) file/link/dir entries
-*** files that do not fit into a single block will continue in the next block
-*** zero-length files have a =SZ= of =0= and no data in the block
-*** manifest header structure
-**** 2-byte size of the header in bytes followed by header rows
-**** header size is for the following fields, not the entire set of entries
-**** fields
-| Tag  | Description                     | Max Size | Type |
-|------+---------------------------------+----------+------|
-| 'NE' | number of entries in this block |        4 | u32  |
-| 'CA' | compression algorithm ('ZSTD')  |        1 | u8   |
-| 'BS' | block size in bytes             |        4 | u32  |
-**** file/directory entries follow (2-byte entry size, header rows)
-**** additional tags for stored content (files and symbolic links)
-| Tag  | Description                                   | Max Size | Type |
-|------+-----------------------------------------------+----------+------|
-| 'IP' | item position: offset within file             |        8 | u64  |
-| 'CP' | content position: offset within content block |        4 | u32  |
-| 'SZ' | size in bytes of this piece of the file       |        4 | u32  |
-** Encrypted manifest+content structure
-*** an encrypted archive will have both the manifest and its content encrypted as a single ~message~
-*** cipher text will be preceded by a header that gives enough information to read the block and decrypt
-*** secret key will be the user-provided passphrase, with salt, run through the KDF
-*** fields
-| Tag  | Description                   | Max Size | Type |
-|------+-------------------------------+----------+------|
-| 'IV' | initialization vector (nonce) | ?        | [u8] |
-| 'ES' | byte size of the cipher text  | 4        | u32  |
-*** the =IV= will typically be 12 to 16 bytes of data
-** Archive entry considerations
-*** directory entries are optional, but must appear before any entries that refer to them
-*** duplicate directory entries are permissible for easier addition of files
-** Archive entry structure
-*** all file/link/directory names are UTF-8 encoded
-*** full file paths are _not_ recorded, parents are referenced by unique identifier
-*** entry date/time is ~Unix time~ (seconds since the epoch) as 32 or 64 bits
-**** https://en.wikipedia.org/wiki/Unix_time
-**** length of the field will be either 4 (32 bits) or 8 (64 bits)
-*** entry with row tag of =ID= is a directory
-*** entry with row tag of =SL= is a symbolic link
-*** entry with neither =ID= nor =SL= is a file
-** Archive entry representing a directory
-*** codifies each unique path as a numeric value for efficiency
-*** file entries will refer to the containing directory by its identifier
-*** nested directories will refer to their parent directory by the unique id
-*** fields
-| Tag  | Max Size | Purpose                             | Required? | Type |
-|------+----------+-------------------------------------+-----------+------|
-| 'ID' |        4 | Unique identifier                   | yes       | u32  |
-| 'NM' |     vary | name of directory                   | yes       | str  |
-| 'PA' |        4 | identifier of parent directory      |           | u32  |
-| 'MO' |        4 | Unix mode                           |           | u32  |
-| 'FA' |        4 | Windows file attributes             |           | u32  |
-| 'MT' |        8 | modification date/time as Unix time |           | i64  |
-| 'CT' |        8 | creation date/time as Unix time     |           | i64  |
-| 'AT' |        8 | access date/time as Unix time       |           | i64  |
-| 'UN' |     vary | name of FS owner                    |           | str  |
-| 'UI' |        4 | user identifier                     |           | u32  |
-| 'GN' |     vary | name of FS group                    |           | str  |
-| 'GI' |        4 | group identifier                    |           | u32  |
-** Archive entry representing a file
-*** fields
-| Tag  | Max Size | Purpose                             | Required? | Type |
-|------+----------+-------------------------------------+-----------+------|
-| 'NM' |     vary | name of file                        | yes       | str  |
-| 'PA' |        4 | identifier of parent directory      |           | u32  |
-| 'MO' |        4 | Unix mode                           |           | u32  |
-| 'FA' |        4 | Windows file attributes             |           | u32  |
-| 'MT' |        8 | modification date/time as Unix time |           | i64  |
-| 'CT' |        8 | creation date/time as Unix time     |           | i64  |
-| 'AT' |        8 | access date/time as Unix time       |           | i64  |
-| 'UN' |     vary | user name                           |           | str  |
-| 'UI' |        4 | user identifier                     |           | u32  |
-| 'GN' |     vary | group name                          |           | str  |
-| 'GI' |        4 | group identifier                    |           | u32  |
-** Archive entry representing a symbolic link
-*** typically symbolic links do not have metadata, depends on OS
-*** fields
-| Tag  | Max Size | Purpose                        | Required? | Type |
-|------+----------+--------------------------------+-----------+------|
-| 'SL' | vary     | name of symbolic link          | yes       | str  |
-| 'PA' | 4        | identifier of parent directory |           | u32  |
 * Action Plan
-** TODO document the basic format
-** TODO experiment with different bundle size values (8, 16, 32, 64)
 ** TODO consider the versioned reader API and if it helps
 ** TODO implement =Reader.entries()= that returns an iterator
 ** TODO add an =unpack()= to the iterator item
@@ -135,15 +12,26 @@
 ** TODO test: unit tests for =read_link()=
 ** TODO test: unit tests for =write_link()=
 ** TODO test: unit tests for enum types into/from helpers
+** TODO add API for adding a part of a file (~file slice~)
+*** add a new =Kind= called =Slice=
+*** this can be used when chunking large files in which not all chunks are archived
+*** provide the file path, offset, size, and a ~name~ for the slice (e.g. checksum)
+*** on extraction the slice will be written to disk using ~name~
+** TODO add files to an existing archive
+*** must build up mapping of full paths to parent rowid
+*** must determine the highest directory identifier so far
+*** if adding a file in a new directory, add dir entry with highest id + 1
+*** if adding a file to an existing directory, use that dir id as the parent
+** TODO write examples
 ** TODO store metadata if option is given
 *** if ~itempos~ is non-zero, file metadata should not be serialized to the block
-** TODO adding new files to an archive needs to determine the highest unique identifier of the existing directories
 ** TODO set file/dir/link MT, AT, CT, mode, owners, etc on extract if option is given
 *** do not do this by default, it almost certainly wouldn't work anyway
-** TODO write examples
 ** TODO find a way to implement =cargo install= for easy installation of the binary
 ** TODO running =list= subcommand through =head= results in a ~broken pipe~ error
 ** nice-to-have: usage errors should be displayed nicely
+*** not providing a password when one is required
+*** providing the wrong password
 ** nice-to-have: include/exclude filters for create, list, and extract operations
 ** nice-to-have: option to add ~associated data~ when encrypting file with AEAD
 ** nice-to-have: check if compressed block is smaller, otherwise keep original data
@@ -160,7 +48,7 @@
 | Info-Zip      |     3.0 |  12557798 | 0m1.458s  |
 | tar.zst       |    1.34 |   8852419 | 0m0.379s  |
 | pack-rs       | 52cae5a |   8843264 | 0m0.529s  |
-| exaf-rs       | ff113a8 |   8806379 | 0m0.550s  |
+| exaf-rs       | 2ce9558 |   8806379 | 0m0.585s  |
 | Pack          |       2 |   8691712 | 0m0.244s  |
 | tar.bz2       |    1.34 |   7540345 | 0m4.948s  |
 | tar.xz        |    1.34 |   6464092 | 0m16.243s |
@@ -173,7 +61,9 @@
 | apparent size |         | 1420319384 | ---       |
 | Info-Zip      |     3.0 |  297273354 | 0m41.645s |
 | pack-rs       | 52cae5a |  218034176 | 0m13.757s |
-| exaf-rs       | ff113a8 |  217369649 | 0m15.377s |
+| exaf-rs 16mb  | 2ce9558 |  217369649 | 0m15.373s |
+| exaf-rs 32mb  | 2ce9558 |  216987782 | 0m14.810s |
+| exaf-rs 64mb  | 2ce9558 |  216763773 | 0m14.556s |
 | tar.zst       |    1.34 |  216776407 | 0m7.536s  |
 | tar.bz2       |    1.34 |  176093102 | 2m22.274s |
 | 7-zip         |   23.01 |  148663215 | 1m49.768s |
