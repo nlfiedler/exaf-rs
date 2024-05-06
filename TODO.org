@@ -1,34 +1,26 @@
 * Action Plan
-** TODO consider the versioned reader API and if it helps
 ** TODO implement =Reader.entries()= that returns an iterator
-** TODO add an =unpack()= to the iterator item
-*** =unpack()= should work for files, links, and directories
+** TODO add an =extract()= to the iterator item
+*** =extract()= should work for files, links, and directories
 ** TODO add =extract_all()= to =Reader=
 ** TODO add =extract_one()= to =Reader= that will extract a file, link, or directory
-** TODO test: unit tests for =HeaderBuilder= and its number downsizing
-*** output a zero-length header; should output =0x0000=
-** TODO test: unit tests for all of the =get_header_*()= functions (number upsizing)
 ** TODO test: unit test that creates and extracts the =tiny_tree= set
-** TODO test: unit tests for =read_link()=
-** TODO test: unit tests for =write_link()=
-** TODO test: unit tests for enum types into/from helpers
 ** TODO add API for adding a part of a file (~file slice~)
 *** add a new =Kind= called =Slice=
 *** this can be used when chunking large files in which not all chunks are archived
 *** provide the file path, offset, size, and a ~name~ for the slice (e.g. checksum)
 *** on extraction the slice will be written to disk using ~name~
-** TODO add files to an existing archive
+** TODO find a way to implement =cargo install= for easy installation of the binary
+** TODO running =list= subcommand through =head= results in a ~broken pipe~ error
+** TODO write examples and API documentation
+** nice-to-have: save and restore file metadata if option is given
+*** do not do this by default, as it almost certainly would not work anyway
+*** if ~itempos~ is non-zero, file metadata should not be serialized to the block
+** nice-to-have: add files to an existing archive
 *** must build up mapping of full paths to parent rowid
 *** must determine the highest directory identifier so far
 *** if adding a file in a new directory, add dir entry with highest id + 1
 *** if adding a file to an existing directory, use that dir id as the parent
-** TODO write examples
-** TODO store metadata if option is given
-*** if ~itempos~ is non-zero, file metadata should not be serialized to the block
-** TODO set file/dir/link MT, AT, CT, mode, owners, etc on extract if option is given
-*** do not do this by default, it almost certainly wouldn't work anyway
-** TODO find a way to implement =cargo install= for easy installation of the binary
-** TODO running =list= subcommand through =head= results in a ~broken pipe~ error
 ** nice-to-have: usage errors should be displayed nicely
 *** not providing a password when one is required
 *** providing the wrong password
@@ -68,48 +60,3 @@
 | tar.bz2       |    1.34 |  176093102 | 2m22.274s |
 | 7-zip         |   23.01 |  148663215 | 1m49.768s |
 | tar.xz        |    1.34 |  144296084 | 9m51.828s |
-* Reference
-** Compression algorithms for consideration
-| Name  | Description              |
-|-------+--------------------------|
-| Copy  | No compression           |
-| ZSTD  | ZStandard                |
-| LZMA  | Improved version of LZ77 |
-| LZMA2 | Improved version of LZMA |
-| BZip2 | Standard BWT algorithm   |
-** Key derivation functions for consideration
-*** from https://en.wikipedia.org/wiki/Key_derivation_function
-: In 2013 a Password Hashing Competition was announced to choose a new,
-: standard algorithm for password hashing. On 20 July 2015 the competition
-: ended and Argon2 was announced as the final winner. Four other algorithms
-: received special recognition: Catena, Lyra2, Makwa, and yescrypt. As of
-: May 2023, OWASP recommends the following KDFs for password hashing, listed
-: in order of priority:
-- Argon2id
-- scrypt if Argon2id is unavailable
-- bcrypt for legacy systems
-- PBKDF2 if FIPS-140 compliance is required
-** Symmetric-key algorithms for consideration
-- AES
-- Camellia
-* Alternatives
-** Pack
-*** https://github.com/PackOrganization/Pack
-*** Zstandard compression, stored as very large blobs in SQLite
-*** written in Pascal with custom built Zstandard and SQLite
-** zip
-*** https://users.cs.jmu.edu/buchhofp/forensics/formats/pkzip.html
-*** flawed encryption
-*** slower compression speed and larger output size than others
-** tar
-*** https://www.gnu.org/software/tar/manual/html_node/Standard.html
-*** significant amount of overhead per entry
-*** compression of whole file makes random access inefficient
-** 7-zip
-*** https://www.7-zip.org
-*** encrypted files can still have their contents listed
-*** does not store file permissions
-** xar
-*** https://en.wikipedia.org/wiki/Xar_(archiver)
-*** suitable for packages and application deliverables
-*** not widely available

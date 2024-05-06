@@ -624,12 +624,24 @@ pub mod writer;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_get_file_name() -> Result<(), Error> {
         assert_eq!(get_file_name(PathBuf::from("")), "");
         assert_eq!(get_file_name(PathBuf::from("path/to/file")), "file");
         assert_eq!(get_file_name(PathBuf::from("path/to/..")), "path/to/..");
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_link_read_link() -> Result<(), Error> {
+        let outdir = tempdir()?;
+        let link = outdir.path().join("mylink");
+        let target = "link_target_is_meaningless";
+        write_link(target.as_bytes(), &link)?;
+        let actual = read_link(&link)?;
+        assert_eq!(actual, target.as_bytes());
         Ok(())
     }
 
@@ -652,6 +664,87 @@ mod tests {
         let result = sanitize_path(Path::new("/usr/../src/./lib.rs"))?;
         assert_eq!(result, PathBuf::from("usr/src/lib.rs"));
         Ok(())
+    }
+
+    #[test]
+    fn test_compression_try_from() {
+        let result = Compression::try_from(0);
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value, Compression::None);
+
+        let result = Compression::try_from(1);
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value, Compression::ZStandard);
+
+        let result = Compression::try_from(2);
+        assert!(result.is_err());
+        let err_string = result.err().unwrap().to_string();
+        assert_eq!(err_string, "unsupported compression algorithm 2");
+    }
+
+    #[test]
+    fn test_compression_into_u8() {
+        let value: u8 = Compression::None.into();
+        assert_eq!(value, 0);
+
+        let value: u8 = Compression::ZStandard.into();
+        assert_eq!(value, 1);
+    }
+
+    #[test]
+    fn test_encryption_try_from() {
+        let result = Encryption::try_from(0);
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value, Encryption::None);
+
+        let result = Encryption::try_from(1);
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value, Encryption::AES256GCM);
+
+        let result = Encryption::try_from(2);
+        assert!(result.is_err());
+        let err_string = result.err().unwrap().to_string();
+        assert_eq!(err_string, "unsupported encryption algorithm 2");
+    }
+
+    #[test]
+    fn test_encryption_into_u8() {
+        let value: u8 = Encryption::None.into();
+        assert_eq!(value, 0);
+
+        let value: u8 = Encryption::AES256GCM.into();
+        assert_eq!(value, 1);
+    }
+
+    #[test]
+    fn test_key_derivation_try_from() {
+        let result = KeyDerivation::try_from(0);
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value, KeyDerivation::None);
+
+        let result = KeyDerivation::try_from(1);
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value, KeyDerivation::Argon2id);
+
+        let result = KeyDerivation::try_from(2);
+        assert!(result.is_err());
+        let err_string = result.err().unwrap().to_string();
+        assert_eq!(err_string, "unsupported key derivation function 2");
+    }
+
+    #[test]
+    fn test_key_derivation_into_u8() {
+        let value: u8 = KeyDerivation::None.into();
+        assert_eq!(value, 0);
+
+        let value: u8 = KeyDerivation::Argon2id.into();
+        assert_eq!(value, 1);
     }
 
     #[test]

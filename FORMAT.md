@@ -276,6 +276,8 @@ Note that an `IP` row _could_ have a 64-bit value, but here it's recorded as a s
 
 Encryption in the archive is applied on a per manifest/content pair basis. That is, the initial archive header remains the same, with the addition of header rows that describe the encryption. After the archive header, the encrypted content will follow, preceded by a short header. It is allowable to have more than one manifest/content pair with some of them encrypted and some of them not encrypted.
 
+An encrypted manifest is distinguished by the presence of a header row with the tag `ES` (_encrypted size_). Otherwise, it is safe to assume that the manifest and content are not encrypted.
+
 As a reminder, the archive header rows related to encryption are as follows:
 
 | Tag  | Description                              | Max Size | Type   |

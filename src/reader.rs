@@ -9,6 +9,11 @@ use std::fs::File;
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom};
 use std::path::Path;
 
+//
+// Concering the versioned reader API, it seems like a good idea but it has not
+// been fleshed out yet, so it looks incomplete at the moment.
+//
+
 ///
 /// A reader of the EXAF format for one version or another.
 ///
@@ -17,7 +22,8 @@ trait VersionedReader {
     fn read_next_header(&mut self) -> Result<HeaderMap, Error>;
 
     // Skip some content in the input stream (such as compressed content).
-    // fn skip_n_bytes(&mut self, skip: u32) -> Result<(), Error>;
+    #[allow(dead_code)]
+    fn skip_n_bytes(&mut self, skip: u32) -> Result<(), Error>;
 
     // Read the given number of bytes into a new vector.
     fn read_n_bytes(&mut self, count: u64) -> Result<Vec<u8>, Error>;
@@ -74,7 +80,9 @@ impl PathBuilder {
     }
 }
 
-// assumes that the archive header has already been read
+///
+/// Lists out all of the entries found in the archive.
+///
 pub fn list_entries(input: &mut Reader) -> Result<(), Error> {
     let mut path_builder = PathBuilder::new();
     // loop until the end of the file is reached
@@ -82,11 +90,9 @@ pub fn list_entries(input: &mut Reader) -> Result<(), Error> {
         // try to read the next manifest header, if any
         match input.read_next_manifest()? {
             Some(manifest) => {
-                let block = input.read_content()?;
-                let mut cursor = std::io::Cursor::new(&block);
                 // read manifest.num_entries entries and list them
                 for _ in 0..manifest.num_entries {
-                    let entry_rows = read_header(&mut cursor)?;
+                    let entry_rows = input.read_next_entry()?;
                     let entry = Entry::try_from(entry_rows)?;
                     if let Some(dir_id) = entry.dir_id {
                         let entry_parent = entry.parent.unwrap_or(0);
@@ -100,6 +106,8 @@ pub fn list_entries(input: &mut Reader) -> Result<(), Error> {
                         println!("{}", entry.name);
                     }
                 }
+                // throw away the compressed content since we are only listing
+                input.read_content()?;
             }
             None => return Ok(()),
         }
@@ -145,7 +153,9 @@ impl TryFrom<HeaderMap> for OutboundContent {
     }
 }
 
-// assumes that the archive header has already been read
+///
+/// Extracts all of the entries in the archive to the current directory.
+///
 pub fn extract_entries(input: &mut Reader) -> Result<u64, Error> {
     // allocate a large buffer for decompressing content to save time
     let mut buffer: Vec<u8> = Vec::with_capacity(BUNDLE_SIZE as usize);
@@ -158,10 +168,8 @@ pub fn extract_entries(input: &mut Reader) -> Result<u64, Error> {
             Some(manifest) => {
                 // collect all files/links into a list to process them a bit later
                 let mut files: Vec<(OutboundContent, PathBuf)> = vec![];
-                let block = input.read_content()?;
-                let mut cursor = std::io::Cursor::new(&block);
                 for _ in 0..manifest.num_entries {
-                    let entry_rows = read_header(&mut cursor)?;
+                    let entry_rows = input.read_next_entry()?;
                     let entry = Entry::try_from(entry_rows.clone())?;
                     if let Some(dir_id) = entry.dir_id {
                         let entry_parent = entry.parent.unwrap_or(0);
@@ -182,13 +190,7 @@ pub fn extract_entries(input: &mut Reader) -> Result<u64, Error> {
                     }
                 }
 
-                let mut taker = cursor.take(manifest.block_size as u64);
-                let mut content: Vec<u8> = vec![];
-                let bytes_read = taker.read_to_end(&mut content)? as u64;
-                if bytes_read != manifest.block_size as u64 {
-                    return Err(Error::UnexpectedEof);
-                }
-                // cursor = taker.into_inner();
+                let mut content = input.read_content()?;
                 if manifest.comp_algo == Compression::ZStandard {
                     zstd::stream::copy_decode(content.as_slice(), &mut buffer)?;
                 } else {
@@ -250,7 +252,7 @@ pub fn extract_entries(input: &mut Reader) -> Result<u64, Error> {
 }
 
 /// Raw header rows consisting of the tags and values without interpretation.
-pub type HeaderMap = HashMap<u16, Vec<u8>>;
+type HeaderMap = HashMap<u16, Vec<u8>>;
 
 // Read a complete header from the stream.
 fn read_header<R: Read>(mut input: R) -> Result<HeaderMap, Error> {
@@ -388,7 +390,7 @@ fn get_header_bytes(rows: &HeaderMap, key: &u16) -> Result<Option<Vec<u8>>, Erro
 /// Optional values read from the archive header.
 ///
 #[allow(dead_code)]
-pub struct ArchiveHeader {
+struct ArchiveHeader {
     /// Encryption algorithm
     enc_algo: Encryption,
     /// Key derivation algorithm
@@ -512,10 +514,13 @@ impl TryFrom<HeaderMap> for Manifest {
     }
 }
 
-pub struct Encrypted {
-    // header.add_bytes(TAG_INIT_VECTOR, &nonce)?;
+///
+/// Parameters related to the subsequent encrypted data.
+///
+struct Encrypted {
+    // nonce, or initialization vector, depending on who you ask
     init_vector: Vec<u8>,
-    // header.add_u32(TAG_ENCRYPTED_SIZE, cipher.len() as u32)?;
+    // size in bytes of the encrypted data following the header
     block_size: u32,
 }
 
@@ -534,6 +539,11 @@ impl TryFrom<HeaderMap> for Encrypted {
     }
 }
 
+//
+// The use of a versioned reader seemed like a good idea but it has not been
+// fully realized as yet; for now it's just convenient to use the code in this
+// way (that is, the ref cells and boxes).
+//
 struct ReaderV1<R: ?Sized> {
     input: RefCell<R>,
 }
@@ -552,11 +562,12 @@ impl<R: Read + Seek> VersionedReader for ReaderV1<R> {
         read_header(input)
     }
 
-    // fn skip_n_bytes(&mut self, skip: u32) -> Result<(), Error> {
-    //     let input = self.input.get_mut();
-    //     input.seek(SeekFrom::Current(skip as i64))?;
-    //     Ok(())
-    // }
+    #[allow(dead_code)]
+    fn skip_n_bytes(&mut self, skip: u32) -> Result<(), Error> {
+        let input = self.input.get_mut();
+        input.seek(SeekFrom::Current(skip as i64))?;
+        Ok(())
+    }
 
     fn read_n_bytes(&mut self, count: u64) -> Result<Vec<u8>, Error> {
         let input = self.input.get_mut();
@@ -576,7 +587,10 @@ pub struct Entries {}
 //     type Item = Result<Entry, Error>;
 // }
 
-#[allow(dead_code)]
+///
+/// Generic archive reader that returns manifest headers, entry headers, and
+/// compressed output.
+///
 pub struct Reader {
     // underlying reader for a specific file format
     reader: Box<dyn VersionedReader>,
@@ -585,10 +599,11 @@ pub struct Reader {
     // secret key for encrypting files, if encryption is enabled
     secret_key: Option<Vec<u8>>,
     // number of bytes to read for the block after the manifest (if none, the
-    // block has already been read)
-    next_block_size: Option<u32>,
+    // manifest has not yet been read, or the block has already been read)
+    block_size: Option<u32>,
     // buffered content, if any (this includes entries and file content)
-    content: Option<Vec<u8>>,
+    // content: Option<Vec<u8>>,
+    content: Option<std::io::Cursor<Vec<u8>>>,
 }
 
 impl Reader {
@@ -602,7 +617,7 @@ impl Reader {
             reader: input,
             header,
             secret_key: None,
-            next_block_size: None,
+            block_size: None,
             content: None,
         })
     }
@@ -639,13 +654,16 @@ impl Reader {
     /// If the archive is encrypted and `enable_encryption()` has been called,
     /// then the encrypted block of entries and file content will be decrypted.
     ///
-    /// To get the block of entry headers and file content, call
-    /// `read_content()` and subsequently call `read_header()` to get the
-    /// `Entry` records.
-    ///
-    /// N.B. Not calling `read_content()` will lead to problems.
+    /// Call `read_next_entry()` to get the next entry in the manifest, doing so
+    /// `manifest.num_entries` times. Then call `read_content()` to get the
+    /// compressed file data. Failing to do so will result in strange errors.
     ///
     pub fn read_next_manifest(&mut self) -> Result<Option<Manifest>, Error> {
+        if self.content.is_some() || self.block_size.is_some() {
+            return Err(Error::InternalError(
+                "you forgot to call read_content()".into(),
+            ));
+        }
         match self.reader.read_next_header() {
             Ok(rows) => {
                 if rows.contains_key(&TAG_ENCRYPTED_SIZE) {
@@ -665,8 +683,8 @@ impl Reader {
                         let manifest = Manifest::try_from(rows)?;
                         let mut buffer: Vec<u8> = vec![];
                         cursor.read_to_end(&mut buffer)?;
-                        self.content = Some(buffer);
-                        self.next_block_size = None;
+                        self.content = Some(std::io::Cursor::new(buffer));
+                        self.block_size = None;
                         return Ok(Some(manifest));
                     } else {
                         return Err(Error::InternalError(
@@ -676,8 +694,8 @@ impl Reader {
                 } else {
                     let manifest = Manifest::try_from(rows)?;
                     // discard any previously cached content and set the next
-                    // block size so that we know to read the content
-                    self.next_block_size = Some(manifest.block_size);
+                    // block size so that we know how to read the content
+                    self.block_size = Some(manifest.block_size);
                     self.content = None;
                     return Ok(Some(manifest));
                 }
@@ -699,36 +717,38 @@ impl Reader {
     }
 
     ///
-    /// Read the upcoming block of entries and content from the archive.
+    /// Read the next set of header rows from the archive.
     ///
-    /// The file data will be preceeded by `num_entries` of `Entry` records.
+    /// This can be called at most `num_entries` times before it starts to
+    /// return garbage, or an error.
     ///
-    /// N.B. Must call `read_next_header()` _before_ calling this function.
+    pub fn read_next_entry(&mut self) -> Result<HeaderMap, Error> {
+        if let Some(reader) = self.content.as_mut() {
+            read_header(reader)
+        } else {
+            self.reader.read_next_header()
+        }
+    }
+
+    ///
+    /// Read the upcoming block of compressed file content from the archive.
+    ///
+    /// This only yields expected results if `read_next_entry()` has been called
+    /// the appropriate number of times.
     ///
     pub fn read_content(&mut self) -> Result<Vec<u8>, Error> {
-        if let Some(content) = self.content.take() {
-            Ok(content)
-        } else if let Some(count) = self.next_block_size.take() {
+        if let Some(mut reader) = self.content.take() {
+            let pos = reader.stream_position()? as usize;
+            let mut buffer = reader.into_inner();
+            buffer.drain(..pos);
+            Ok(buffer)
+        } else if let Some(count) = self.block_size.take() {
             self.reader.read_n_bytes(count as u64)
         } else {
             Err(Error::InternalError(
                 "should call read_next_manifest() first".into(),
             ))
         }
-    }
-}
-
-impl VersionedReader for Reader {
-    fn read_next_header(&mut self) -> Result<HeaderMap, Error> {
-        self.reader.read_next_header()
-    }
-
-    // fn skip_n_bytes(&mut self, skip: u32) -> Result<(), Error> {
-    //     self.reader.skip_n_bytes(skip)
-    // }
-
-    fn read_n_bytes(&mut self, count: u64) -> Result<Vec<u8>, Error> {
-        self.reader.read_n_bytes(count)
     }
 }
 
@@ -754,12 +774,94 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_get_header_u16() -> Result<(), Error> {
+        let input: Vec<u8> = vec![0, 1, 0x12, 0x34, 0, 2, 255, 255];
+        let rows = read_header(input.as_slice())?;
+        assert_eq!(rows.len(), 1);
+        let maybe_value = get_header_u16(&rows, &0x1234)?;
+        let value = maybe_value.unwrap();
+        assert_eq!(value, 65_535);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_header_u32_up() -> Result<(), Error> {
+        let input: Vec<u8> = vec![0, 1, 0x12, 0x34, 0, 2, 255, 255];
+        let rows = read_header(input.as_slice())?;
+        assert_eq!(rows.len(), 1);
+        let maybe_value = get_header_u32(&rows, &0x1234)?;
+        let value = maybe_value.unwrap();
+        assert_eq!(value, 65_535);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_header_u64_up() -> Result<(), Error> {
+        let input: Vec<u8> = vec![0, 1, 0x12, 0x34, 0, 4, 255, 255, 255, 255];
+        let rows = read_header(input.as_slice())?;
+        assert_eq!(rows.len(), 1);
+        let maybe_value = get_header_u64(&rows, &0x1234)?;
+        let value = maybe_value.unwrap();
+        assert_eq!(value, 4_294_967_295);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_header_time_i32() -> Result<(), Error> {
+        let input: Vec<u8> = vec![0, 1, 0x12, 0x34, 0, 4, 0x66, 0x38, 0x17, 0x80];
+        let rows = read_header(input.as_slice())?;
+        assert_eq!(rows.len(), 1);
+        let maybe_value = get_header_time(&rows, &0x1234)?;
+        let value = maybe_value.unwrap();
+        assert_eq!(value.year(), 2024);
+        assert_eq!(value.month(), 5);
+        assert_eq!(value.day(), 5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_header_time_i64() -> Result<(), Error> {
+        // the value may fit in 4 bytes but its signed value is outside of the
+        // range supported by an i32 so we must use i64
+        let input: Vec<u8> = vec![0, 1, 0x12, 0x34, 0, 8, 0, 0, 0, 0, 0x93, 0xf7, 0x14, 0x00];
+        let rows = read_header(input.as_slice())?;
+        assert_eq!(rows.len(), 1);
+        let maybe_value = get_header_time(&rows, &0x1234)?;
+        let value = maybe_value.unwrap();
+        assert_eq!(value.year(), 2048);
+        assert_eq!(value.month(), 8);
+        assert_eq!(value.day(), 30);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_header_str() -> Result<(), Error> {
+        let input: Vec<u8> = vec![0, 1, 0x12, 0x34, 0, 6, b'f', b'o', b'o', b'b', b'a', b'r'];
+        let rows = read_header(input.as_slice())?;
+        assert_eq!(rows.len(), 1);
+        let maybe_value = get_header_str(&rows, &0x1234)?;
+        let value = maybe_value.unwrap();
+        assert_eq!(value, "foobar");
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_header_bytes() -> Result<(), Error> {
+        let input: Vec<u8> = vec![0, 1, 0x12, 0x34, 0, 6, b'f', b'o', b'o', b'b', b'a', b'r'];
+        let rows = read_header(input.as_slice())?;
+        assert_eq!(rows.len(), 1);
+        let maybe_value = get_header_bytes(&rows, &0x1234)?;
+        let value = maybe_value.unwrap();
+        assert_eq!(value, "foobar".as_bytes());
+        Ok(())
+    }
+
+    #[test]
     fn test_version1_reader_one_tiny_file() -> Result<(), Error> {
         let input_path = "test/fixtures/version1/one_tiny_file.exa";
         let mut reader = from_file(input_path)?;
-        let manifest_hdr = reader.read_next_header()?;
-        assert_eq!(manifest_hdr.len(), 3);
-        let manifest = Manifest::try_from(manifest_hdr)?;
+        let maybe_manifest = reader.read_next_manifest()?;
+        let manifest = maybe_manifest.unwrap();
         assert_eq!(manifest.num_entries, 1);
         assert_eq!(manifest.comp_algo, Compression::ZStandard);
         assert_eq!(manifest.block_size, 32);

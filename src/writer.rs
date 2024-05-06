@@ -449,7 +449,7 @@ impl HeaderBuilder {
     fn add_i32(&mut self, tag: u16, value: i32) -> Result<(), Error> {
         let tag_bytes = u16::to_be_bytes(tag);
         self.buffer.write_all(&tag_bytes)?;
-        self.buffer.write_all(&[0, 8])?;
+        self.buffer.write_all(&[0, 4])?;
         let value_bytes = i32::to_be_bytes(value);
         self.buffer.write_all(&value_bytes)?;
         self.row_count += 1;
@@ -474,7 +474,7 @@ impl HeaderBuilder {
     /// Add a variable length string to the header.
     fn add_str(&mut self, tag: u16, value: &str) -> Result<(), Error> {
         // the value is almost certainly not going to be this long
-        if value.len() > 65536 {
+        if value.len() > 65535 {
             return Err(Error::InternalError("add_str value too long".into()));
         }
         let tag_bytes = u16::to_be_bytes(tag);
@@ -490,7 +490,7 @@ impl HeaderBuilder {
     /// Add a variable length slice of bytes to the header.
     fn add_bytes(&mut self, tag: u16, value: &[u8]) -> Result<(), Error> {
         // the value is almost certainly not going to be this long
-        if value.len() > 65536 {
+        if value.len() > 65535 {
             return Err(Error::InternalError("add_bytes value too long".into()));
         }
         let tag_bytes = u16::to_be_bytes(tag);
@@ -594,4 +594,124 @@ fn add_content_rows(
     // size of content will never more than 2^32 bytes
     header.add_u32(TAG_ITEM_SIZE, item_content.size as u32)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_header_builder_empty() -> Result<(), Error> {
+        let builder = HeaderBuilder::new();
+        let mut output: Vec<u8> = vec![];
+        builder.write_header(&mut output)?;
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[..], [0, 0]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_header_builder_down_i64() -> Result<(), Error> {
+        let mut builder = HeaderBuilder::new();
+        builder.add_i64(0x1234, 101)?;
+        let mut output: Vec<u8> = vec![];
+        builder.write_header(&mut output)?;
+        assert_eq!(output.len(), 10);
+        assert_eq!(output[..], [0, 1, 0x12, 0x34, 0, 4, 0, 0, 0, 101]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_header_builder_down_u64() -> Result<(), Error> {
+        let mut builder = HeaderBuilder::new();
+        builder.add_u64(0x1234, 101)?;
+        let mut output: Vec<u8> = vec![];
+        builder.write_header(&mut output)?;
+        assert_eq!(output.len(), 7);
+        assert_eq!(output[..], [0, 1, 0x12, 0x34, 0, 1, 101]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_header_builder_down_i32() -> Result<(), Error> {
+        let mut builder = HeaderBuilder::new();
+        builder.add_i32(0x1234, 101)?;
+        let mut output: Vec<u8> = vec![];
+        builder.write_header(&mut output)?;
+        assert_eq!(output.len(), 10);
+        assert_eq!(output[..], [0, 1, 0x12, 0x34, 0, 4, 0, 0, 0, 101]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_header_builder_u8() -> Result<(), Error> {
+        let mut builder = HeaderBuilder::new();
+        builder.add_u8(0x1234, 255)?;
+        let mut output: Vec<u8> = vec![];
+        builder.write_header(&mut output)?;
+        assert_eq!(output.len(), 7);
+        assert_eq!(output[..], [0, 1, 0x12, 0x34, 0, 1, 255]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_header_builder_u16() -> Result<(), Error> {
+        let mut builder = HeaderBuilder::new();
+        builder.add_u16(0x1234, 65_535)?;
+        let mut output: Vec<u8> = vec![];
+        builder.write_header(&mut output)?;
+        assert_eq!(output.len(), 8);
+        assert_eq!(output[..], [0, 1, 0x12, 0x34, 0, 2, 255, 255]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_header_builder_u32() -> Result<(), Error> {
+        let mut builder = HeaderBuilder::new();
+        builder.add_u32(0x1234, 4_294_967_295)?;
+        let mut output: Vec<u8> = vec![];
+        builder.write_header(&mut output)?;
+        assert_eq!(output.len(), 10);
+        assert_eq!(output[..], [0, 1, 0x12, 0x34, 0, 4, 255, 255, 255, 255]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_header_builder_u64() -> Result<(), Error> {
+        let mut builder = HeaderBuilder::new();
+        builder.add_u64(0x1234, 4_294_967_297)?;
+        let mut output: Vec<u8> = vec![];
+        builder.write_header(&mut output)?;
+        assert_eq!(output.len(), 14);
+        assert_eq!(output[..], [0, 1, 0x12, 0x34, 0, 8, 0, 0, 0, 1, 0, 0, 0, 1]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_header_builder_str() -> Result<(), Error> {
+        let mut builder = HeaderBuilder::new();
+        builder.add_str(0x1234, "foobar")?;
+        let mut output: Vec<u8> = vec![];
+        builder.write_header(&mut output)?;
+        assert_eq!(output.len(), 12);
+        assert_eq!(
+            output[..],
+            [0, 1, 0x12, 0x34, 0, 6, b'f', b'o', b'o', b'b', b'a', b'r']
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_header_builder_bytes() -> Result<(), Error> {
+        let mut builder = HeaderBuilder::new();
+        builder.add_bytes(0x1234, "foobar".as_bytes())?;
+        let mut output: Vec<u8> = vec![];
+        builder.write_header(&mut output)?;
+        assert_eq!(output.len(), 12);
+        assert_eq!(
+            output[..],
+            [0, 1, 0x12, 0x34, 0, 6, b'f', b'o', b'o', b'b', b'a', b'r']
+        );
+        Ok(())
+    }
 }
