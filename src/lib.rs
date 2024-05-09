@@ -470,7 +470,7 @@ pub struct Entry {
 
 impl Entry {
     ///
-    /// Create an instance of `EntryMetadata` based on the given path.
+    /// Create an instance of `Entry` based on the given path.
     ///
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         let name = get_file_name(path.as_ref());
@@ -518,6 +518,27 @@ impl Entry {
             atime,
         };
         em.owners(path.as_ref())
+    }
+
+    ///
+    /// Create an instance of `Entry` with just the given name.
+    ///
+    pub fn with_name<S: Into<String>>(name: S) -> Self {
+        Self {
+            name: name.into(),
+            is_link: false,
+            dir_id: None,
+            parent: None,
+            mode: None,
+            attrs: None,
+            uid: None,
+            gid: None,
+            user: None,
+            group: None,
+            ctime: None,
+            mtime: None,
+            atime: None,
+        }
     }
 
     ///
@@ -625,8 +646,12 @@ impl Entry {
 ///
 #[derive(Debug, PartialEq)]
 pub enum Kind {
+    /// Item represents a file an its entirety.
     File,
+    /// Item represents a symbolic link.
     Link,
+    /// Item represents a portion of a file at the given offset.
+    Slice(u64),
 }
 
 // tags for archive header rows

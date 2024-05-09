@@ -268,6 +268,65 @@ impl<W: Write + Seek> PackBuilder<W> {
         Ok(())
     }
 
+    ///
+    /// Adds a slice of a file to the archive, using the given name.
+    ///
+    /// Depending on the size of the slice and the content bundle so far, this
+    /// may result in writing one or more manifest/content pairs to the output.
+    ///
+    /// **Note:** Remember to call `finish()` when done adding content.
+    ///
+    pub fn add_file_slice<P: AsRef<Path>, S: Into<String>>(
+        &mut self,
+        path: P,
+        name: S,
+        parent: Option<u32>,
+        offset: u64,
+        length: u32,
+    ) -> Result<(), Error> {
+        self.prev_file_id += 1;
+        let mut file_entry = Entry::with_name(name);
+        file_entry.parent = parent;
+        self.files.insert(self.prev_file_id, file_entry);
+
+        let mut itempos: u64 = offset;
+        let mut size: u64 = length as u64;
+        loop {
+            if self.current_pos + size > BUNDLE_SIZE {
+                let remainder = BUNDLE_SIZE - self.current_pos;
+                // add a portion of the file to fill the bundle
+                let content = IncomingContent {
+                    path: path.as_ref().to_path_buf(),
+                    kind: Kind::Slice(offset),
+                    file_id: self.prev_file_id,
+                    itempos,
+                    contentpos: self.current_pos,
+                    size: remainder,
+                };
+                self.contents.push(content);
+                // insert the content and itemcontent rows and start a new
+                // bundle, then continue with the current file
+                self.process_contents()?;
+                size -= remainder;
+                itempos += remainder;
+            } else {
+                // the remainder of the file fits within this content bundle
+                let content = IncomingContent {
+                    path: path.as_ref().to_path_buf(),
+                    kind: Kind::Slice(offset),
+                    file_id: self.prev_file_id,
+                    itempos,
+                    contentpos: self.current_pos,
+                    size,
+                };
+                self.contents.push(content);
+                self.current_pos += size;
+                break;
+            }
+        }
+        Ok(())
+    }
+
     //
     // Creates a content bundle based on the data collected so far, then
     // compresses it, produces a manifest to describe the entries in this
@@ -287,14 +346,18 @@ impl<W: Write + Seek> PackBuilder<W> {
         // iterate through the file contents, compressing to the buffer
         let mut encoder = zstd::stream::write::Encoder::new(content, 0)?;
         for item in self.contents.iter() {
-            if item.kind == Kind::File {
-                let mut input = fs::File::open(&item.path)?;
-                input.seek(SeekFrom::Start(item.itempos))?;
-                let mut chunk = input.take(item.size);
-                io::copy(&mut chunk, &mut encoder)?;
-            } else if item.kind == Kind::Link {
-                let value = read_link(&item.path)?;
-                encoder.write_all(&value)?;
+            match item.kind {
+                Kind::Link => {
+                    let value = read_link(&item.path)?;
+                    encoder.write_all(&value)?;
+                }
+                _ => {
+                    // files and slices of files are handled the same
+                    let mut input = fs::File::open(&item.path)?;
+                    input.seek(SeekFrom::Start(item.itempos))?;
+                    let mut chunk = input.take(item.size);
+                    io::copy(&mut chunk, &mut encoder)?;
+                }
             }
         }
         content = encoder.finish()?;
@@ -588,7 +651,16 @@ fn add_content_rows(
     item_content: &IncomingContent,
     header: &mut HeaderBuilder,
 ) -> Result<(), Error> {
-    header.add_u64(TAG_ITEM_POS, item_content.itempos)?;
+    match item_content.kind {
+        Kind::Slice(offset) => {
+            // slices will be extracted as their own file, so the recorded item
+            // position must be adjusted based on the starting offset
+            header.add_u64(TAG_ITEM_POS, item_content.itempos - offset)?;
+        }
+        _ => {
+            header.add_u64(TAG_ITEM_POS, item_content.itempos)?;
+        }
+    }
     // content position will never more than 2^32 bytes
     header.add_u32(TAG_CONTENT_POS, item_content.contentpos as u32)?;
     // size of content will never more than 2^32 bytes
@@ -599,6 +671,7 @@ fn add_content_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_header_builder_empty() -> Result<(), Error> {
@@ -712,6 +785,45 @@ mod tests {
             output[..],
             [0, 1, 0x12, 0x34, 0, 6, b'f', b'o', b'o', b'b', b'a', b'r']
         );
+        Ok(())
+    }
+
+    fn sha1_from_file(infile: &Path) -> io::Result<String> {
+        use sha1::{Digest, Sha1};
+        let mut file = fs::File::open(infile)?;
+        let mut hasher = Sha1::new();
+        io::copy(&mut file, &mut hasher)?;
+        let digest = hasher.finalize();
+        Ok(format!("{:x}", digest))
+    }
+
+    #[test]
+    fn test_create_archive_file_slice() -> Result<(), Error> {
+        // create the archive
+        let outdir = tempdir()?;
+        let archive = outdir.path().join("archive.exa");
+        let output = std::fs::File::create(&archive)?;
+        let mut builder = super::writer::PackBuilder::new(output)?;
+        builder.add_file_slice(
+            "test/fixtures/IMG_0385.JPG",
+            "5ba33678260abc495b6c77003ddab5cc613b9ba7",
+            None,
+            4096,
+            8192,
+        )?;
+        builder.finish()?;
+
+        // extract the archive and verify everything
+        let mut reader = super::reader::from_file(&archive)?;
+        reader.extract_all(outdir.path())?;
+        let actual = sha1_from_file(
+            outdir
+                .path()
+                .join("5ba33678260abc495b6c77003ddab5cc613b9ba7")
+                .as_path(),
+        )?;
+        assert_eq!(actual, "5ba33678260abc495b6c77003ddab5cc613b9ba7");
+
         Ok(())
     }
 }

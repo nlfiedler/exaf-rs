@@ -1,6 +1,6 @@
 # Exaf
 
-The EXtensible Archiver Format is intended to be used in compressing and archiving files. It offers an alternative to the well-known zip and 7-zip formats, with extensibility in mind. The running time is similar to that of GNU tar with Zstandard compression, and the resulting file size is very similar. It is much faster and the file size is considerably smaller than Info-Zip. While the file size is larger than that of 7-zip, the run time is much less. Encryption of both metadata and file content is implemented using the Argon2id key derivation function and an AEAD cipher that assures the data confidentiality and authenticity. See the [Encryption](#encryption) section below for more information.
+The EXtensible Archiver Format is intended to be used in compressing and archiving files. It offers an alternative to the well-known zip and 7-zip formats, with extensibility in mind. The running time of this reference implementation is similar to that of GNU tar with Zstandard compression, and the resulting file size is very similar. It is much faster and the file size is considerably smaller than Info-Zip. While the file size is larger than that of 7-zip, the run time is much less. Encryption of both metadata and file content is implemented using the Argon2id key derivation function and an AEAD cipher that ensures the data confidentiality and authenticity. See the [Encryption](#encryption) section below for more information.
 
 ## Specification
 
@@ -12,7 +12,7 @@ What distinguishes this format from that of tar with Zstandard is that the table
 
 ## Objectives
 
-First and foremost, the purpose of this project is to satisfy my own needs, and it is written in [Rust](https://www.rust-lang.org) so that I can use it within my own Rust-based applications. If it happens to be useful to others, fantastic, and I would be more than happy to continue developing toward that end. The next task will be to provide a full-featured binary as well as a [Rust](https://www.rust-lang.org) library with an interface similar to that of the [tar crate](https://docs.rs/tar/latest/tar/).
+First and foremost, the purpose of this project is to satisfy my own needs, and it is written in [Rust](https://www.rust-lang.org) so that I can use it within my own Rust-based applications. If it happens to be useful to others, fantastic, and I would be more than happy to continue developing toward that end.
 
 ## Build and Run
 
@@ -22,7 +22,7 @@ First and foremost, the purpose of this project is to satisfy my own needs, and 
 
 ### Running the tests
 
-For the time being there are very few unit tests.
+Basic unit tests are available that exercise most of the functionality.
 
 ```shell
 cargo test

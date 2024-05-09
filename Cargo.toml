@@ -22,4 +22,5 @@ thiserror = "1.0.58"
 zstd = "0.13.1"
 
 [dev-dependencies]
+sha1 = "0.10.6"
 tempfile = "3.7.1"

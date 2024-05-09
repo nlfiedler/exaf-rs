@@ -1,9 +1,4 @@
 * Action Plan
-** TODO add API for adding a part of a file (~file slice~)
-*** add a new =Kind= called =Slice=
-*** this can be used when chunking large files in which not all chunks are archived
-*** provide the file path, offset, size, and a ~name~ for the slice (e.g. checksum)
-*** on extraction the slice will be written to disk using ~name~
 ** TODO running =list= subcommand through =head= results in a ~broken pipe~ error
 ** TODO write examples and API documentation
 ** TODO file bugs on github for anything remaining in this todo and delete this file
