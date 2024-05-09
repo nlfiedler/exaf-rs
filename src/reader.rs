@@ -3,14 +3,14 @@
 //
 use super::*;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom};
 use std::path::Path;
 
 //
-// Concering the versioned reader API, it seems like a good idea but it has not
+// Concerning the versioned reader API, it seems like a good idea but it has not
 // been fleshed out yet, so it looks incomplete at the moment.
 //
 
@@ -80,40 +80,6 @@ impl PathBuilder {
     }
 }
 
-///
-/// Lists out all of the entries found in the archive.
-///
-pub fn list_entries(input: &mut Reader) -> Result<(), Error> {
-    let mut path_builder = PathBuilder::new();
-    // loop until the end of the file is reached
-    loop {
-        // try to read the next manifest header, if any
-        match input.read_next_manifest()? {
-            Some(manifest) => {
-                // read manifest.num_entries entries and list them
-                for _ in 0..manifest.num_entries {
-                    let entry_rows = input.read_next_entry()?;
-                    let entry = Entry::try_from(entry_rows)?;
-                    if let Some(dir_id) = entry.dir_id {
-                        let entry_parent = entry.parent.unwrap_or(0);
-                        path_builder.insert(dir_id, entry_parent, entry.name.clone());
-                    }
-                    if let Some(parent) = entry.parent {
-                        let mut fullpath = path_builder.get_full_path(parent)?;
-                        fullpath = fullpath.join(entry.name);
-                        println!("{}", fullpath.to_string_lossy());
-                    } else {
-                        println!("{}", entry.name);
-                    }
-                }
-                // throw away the compressed content since we are only listing
-                input.read_content()?;
-            }
-            None => return Ok(()),
-        }
-    }
-}
-
 // describes a file/link that will be extracted from the content block
 #[derive(Debug)]
 struct OutboundContent {
@@ -150,104 +116,6 @@ impl TryFrom<HeaderMap> for OutboundContent {
             size: size as u64,
             kind,
         })
-    }
-}
-
-///
-/// Extracts all of the entries in the archive to the current directory.
-///
-pub fn extract_entries(input: &mut Reader) -> Result<u64, Error> {
-    // allocate a large buffer for decompressing content to save time
-    let mut buffer: Vec<u8> = Vec::with_capacity(BUNDLE_SIZE as usize);
-    let mut path_builder = PathBuilder::new();
-    let mut file_count: u64 = 0;
-    // loop until the end of the file is reached
-    loop {
-        // try to read the next manifest header, if any
-        match input.read_next_manifest()? {
-            Some(manifest) => {
-                // collect all files/links into a list to process them a bit later
-                let mut files: Vec<(OutboundContent, PathBuf)> = vec![];
-                for _ in 0..manifest.num_entries {
-                    let entry_rows = input.read_next_entry()?;
-                    let entry = Entry::try_from(entry_rows.clone())?;
-                    if let Some(dir_id) = entry.dir_id {
-                        let entry_parent = entry.parent.unwrap_or(0);
-                        path_builder.insert(dir_id, entry_parent, entry.name.clone());
-                    }
-                    let path = if let Some(parent) = entry.parent {
-                        path_builder.get_full_path(parent)?.join(entry.name)
-                    } else {
-                        PathBuf::from(entry.name)
-                    };
-                    if entry.dir_id.is_some() {
-                        // ensure directories exist, even the empty ones
-                        let fpath = super::sanitize_path(path)?;
-                        fs::create_dir_all(fpath)?;
-                    } else {
-                        let oc = OutboundContent::try_from(entry_rows.clone())?;
-                        files.push((oc, path));
-                    }
-                }
-
-                let mut content = input.read_content()?;
-                if manifest.comp_algo == Compression::ZStandard {
-                    zstd::stream::copy_decode(content.as_slice(), &mut buffer)?;
-                } else {
-                    // the only remaining option is copy (keep the larger buffer
-                    // to optimize memory management)
-                    if buffer.len() > content.len() {
-                        buffer.extend(content.drain(..));
-                    } else {
-                        buffer = content;
-                    }
-                }
-
-                // process each of the outbound content elements
-                for (entry, path) in files.iter() {
-                    // perform basic sanitization of the path to prevent abuse
-                    let fpath = super::sanitize_path(path)?;
-                    if entry.kind == Kind::File {
-                        // make sure the file exists and is writable
-                        let mut output = fs::OpenOptions::new()
-                            .write(true)
-                            .create(true)
-                            .open(&fpath)?;
-                        let file_len = fs::metadata(fpath)?.len();
-                        if file_len == 0 {
-                            // just created a new file, count it
-                            file_count += 1;
-                        }
-                        // if the file was an empty file, then we are already done
-                        if entry.size > 0 {
-                            // ensure the file has the appropriate length for writing this
-                            // content chunk into the file, extending it if necessary
-                            if file_len < entry.itempos {
-                                output.set_len(entry.itempos)?;
-                            }
-                            // seek to the correct position within the file for this chunk
-                            if entry.itempos > 0 {
-                                output.seek(SeekFrom::Start(entry.itempos))?;
-                            }
-                            let mut cursor = std::io::Cursor::new(&buffer);
-                            cursor.seek(SeekFrom::Start(entry.contentpos))?;
-                            let mut chunk = cursor.take(entry.size);
-                            io::copy(&mut chunk, &mut output)?;
-                        }
-                    } else if entry.kind == Kind::Link {
-                        // links are always captured in whole, never chunks
-                        let mut cursor = std::io::Cursor::new(&buffer);
-                        cursor.seek(SeekFrom::Start(entry.contentpos))?;
-                        let mut chunk = cursor.take(entry.size);
-                        let mut raw_bytes: Vec<u8> = vec![];
-                        chunk.read_to_end(&mut raw_bytes)?;
-                        write_link(&raw_bytes, &fpath)?;
-                    }
-                }
-                buffer.clear();
-            }
-            None => return Ok(file_count),
-        }
     }
 }
 
@@ -476,7 +344,8 @@ impl TryFrom<HeaderMap> for Entry {
 /// Represents the properties related to a content block that holds one or more
 /// files (or parts of files).
 ///
-pub struct Manifest {
+#[derive(Debug)]
+struct Manifest {
     /// Number of directory, file, or symbolic links in the content block.
     num_entries: u32,
     /// Compression algorithm for this content block.
@@ -542,7 +411,7 @@ impl TryFrom<HeaderMap> for Encrypted {
 //
 // The use of a versioned reader seemed like a good idea but it has not been
 // fully realized as yet; for now it's just convenient to use the code in this
-// way (that is, the ref cells and boxes).
+// way (that is, the ref cells and boxes and helpful).
 //
 struct ReaderV1<R: ?Sized> {
     input: RefCell<R>,
@@ -581,12 +450,6 @@ impl<R: Read + Seek> VersionedReader for ReaderV1<R> {
     }
 }
 
-pub struct Entries {}
-
-// impl Iterator for Entries {
-//     type Item = Result<Entry, Error>;
-// }
-
 ///
 /// Generic archive reader that returns manifest headers, entry headers, and
 /// compressed output.
@@ -622,6 +485,9 @@ impl Reader {
         })
     }
 
+    ///
+    /// Return `true` if the archive appears to have encrypted content.
+    ///
     pub fn is_encrypted(&self) -> bool {
         self.header.key_algo != KeyDerivation::None
     }
@@ -629,7 +495,7 @@ impl Reader {
     ///
     /// Enable encryption when reading the archive, using the given passphrase.
     ///
-    pub fn enable_encryption(mut self, password: &str) -> Result<Self, Error> {
+    pub fn enable_encryption(&mut self, password: &str) -> Result<(), Error> {
         let kd = self.header.key_algo.clone();
         if let Some(ref salt) = self.header.salt {
             let mut params: KeyDerivationParams = Default::default();
@@ -638,11 +504,111 @@ impl Reader {
             params = params.para_cost(self.header.para_cost);
             params = params.tag_length(self.header.tag_length);
             self.secret_key = Some(derive_key(&kd, password, salt, &params)?);
-            Ok(self)
+            Ok(())
         } else {
             Err(Error::InternalError(
                 "called enable_encryption() on plain archive".into(),
             ))
+        }
+    }
+
+    ///
+    /// Extracts all of the entries in the archive to the current directory.
+    ///
+    pub fn extract_all(&mut self, output_dir: &Path) -> Result<u64, Error> {
+        // allocate a large buffer for decompressing content to save time
+        let mut buffer: Vec<u8> = Vec::with_capacity(BUNDLE_SIZE as usize);
+        let mut path_builder = PathBuilder::new();
+        let mut file_count: u64 = 0;
+        // loop until the end of the file is reached
+        loop {
+            // try to read the next manifest header, if any
+            match self.read_next_manifest()? {
+                Some(manifest) => {
+                    // collect all files/links into a list to process them a bit later
+                    let mut files: Vec<(OutboundContent, PathBuf)> = vec![];
+                    for _ in 0..manifest.num_entries {
+                        let entry_rows = self.read_next_entry()?;
+                        let entry = Entry::try_from(entry_rows.clone())?;
+                        if let Some(dir_id) = entry.dir_id {
+                            let entry_parent = entry.parent.unwrap_or(0);
+                            path_builder.insert(dir_id, entry_parent, entry.name.clone());
+                        }
+                        let path = if let Some(parent) = entry.parent {
+                            path_builder.get_full_path(parent)?.join(entry.name)
+                        } else {
+                            PathBuf::from(entry.name)
+                        };
+                        if entry.dir_id.is_some() {
+                            // ensure directories exist, even the empty ones
+                            let safe_path = super::sanitize_path(path)?;
+                            let fpath = output_dir.to_path_buf().join(safe_path);
+                            fs::create_dir_all(&fpath)?;
+                        } else {
+                            let oc = OutboundContent::try_from(entry_rows.clone())?;
+                            files.push((oc, path));
+                        }
+                    }
+
+                    let mut content = self.read_content()?;
+                    if manifest.comp_algo == Compression::ZStandard {
+                        zstd::stream::copy_decode(content.as_slice(), &mut buffer)?;
+                    } else {
+                        // the only remaining option is copy (keep the larger buffer
+                        // to optimize memory management)
+                        if buffer.len() > content.len() {
+                            buffer.extend(content.drain(..));
+                        } else {
+                            buffer = content;
+                        }
+                    }
+
+                    // process each of the outbound content elements
+                    for (entry, path) in files.iter() {
+                        // perform basic sanitization of the path to prevent abuse
+                        let safe_path = super::sanitize_path(path)?;
+                        let fpath = output_dir.to_path_buf().join(safe_path);
+                        if entry.kind == Kind::File {
+                            // make sure the file exists and is writable
+                            let mut output = fs::OpenOptions::new()
+                                .write(true)
+                                .create(true)
+                                .open(&fpath)?;
+                            let file_len = fs::metadata(fpath)?.len();
+                            if file_len == 0 {
+                                // just created a new file, count it
+                                file_count += 1;
+                            }
+                            // if the file was an empty file, then we are already done
+                            if entry.size > 0 {
+                                // ensure the file has the appropriate length for writing this
+                                // content chunk into the file, extending it if necessary
+                                if file_len < entry.itempos {
+                                    output.set_len(entry.itempos)?;
+                                }
+                                // seek to the correct position within the file for this chunk
+                                if entry.itempos > 0 {
+                                    output.seek(SeekFrom::Start(entry.itempos))?;
+                                }
+                                let mut cursor = std::io::Cursor::new(&buffer);
+                                cursor.seek(SeekFrom::Start(entry.contentpos))?;
+                                let mut chunk = cursor.take(entry.size);
+                                io::copy(&mut chunk, &mut output)?;
+                            }
+                        } else if entry.kind == Kind::Link {
+                            // links are always captured in whole, never chunks
+                            let mut cursor = std::io::Cursor::new(&buffer);
+                            cursor.seek(SeekFrom::Start(entry.contentpos))?;
+                            let mut chunk = cursor.take(entry.size);
+                            let mut raw_bytes: Vec<u8> = vec![];
+                            chunk.read_to_end(&mut raw_bytes)?;
+                            write_link(&raw_bytes, &fpath)?;
+                        }
+                    }
+                    buffer.clear();
+                }
+                None => return Ok(file_count),
+            }
         }
     }
 
@@ -658,7 +624,7 @@ impl Reader {
     /// `manifest.num_entries` times. Then call `read_content()` to get the
     /// compressed file data. Failing to do so will result in strange errors.
     ///
-    pub fn read_next_manifest(&mut self) -> Result<Option<Manifest>, Error> {
+    fn read_next_manifest(&mut self) -> Result<Option<Manifest>, Error> {
         if self.content.is_some() || self.block_size.is_some() {
             return Err(Error::InternalError(
                 "you forgot to call read_content()".into(),
@@ -722,7 +688,7 @@ impl Reader {
     /// This can be called at most `num_entries` times before it starts to
     /// return garbage, or an error.
     ///
-    pub fn read_next_entry(&mut self) -> Result<HeaderMap, Error> {
+    fn read_next_entry(&mut self) -> Result<HeaderMap, Error> {
         if let Some(reader) = self.content.as_mut() {
             read_header(reader)
         } else {
@@ -736,7 +702,7 @@ impl Reader {
     /// This only yields expected results if `read_next_entry()` has been called
     /// the appropriate number of times.
     ///
-    pub fn read_content(&mut self) -> Result<Vec<u8>, Error> {
+    fn read_content(&mut self) -> Result<Vec<u8>, Error> {
         if let Some(mut reader) = self.content.take() {
             let pos = reader.stream_position()? as usize;
             let mut buffer = reader.into_inner();
@@ -748,6 +714,117 @@ impl Reader {
             Err(Error::InternalError(
                 "should call read_next_manifest() first".into(),
             ))
+        }
+    }
+}
+
+// Calculate the hash value for a given string.
+fn calculate_hash(name: &str) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut s = DefaultHasher::new();
+    name.hash(&mut s);
+    s.finish()
+}
+
+///
+/// An iterator over the entries within an archive.
+///
+/// The caller should check if the archive is encrypted by calling the
+/// `is_encrypted()` function, and if it returns `true`, then call
+/// `enable_encryption()` with a password provided by the user.
+///
+pub struct Entries {
+    reader: Reader,
+    path_builder: PathBuilder,
+    entries_remaining: Option<u32>,
+    visited: HashSet<u64>,
+}
+
+impl Entries {
+    ///
+    /// Create an `Entries` iterator for the given file.
+    ///
+    pub fn new<P: AsRef<Path>>(infile: P) -> Result<Entries, Error> {
+        let reader = from_file(infile)?;
+        let path_builder = PathBuilder::new();
+        Ok(Self {
+            reader,
+            path_builder,
+            entries_remaining: None,
+            visited: HashSet::new(),
+        })
+    }
+
+    ///
+    /// Return `true` if the archive appears to have encrypted content.
+    ///
+    pub fn is_encrypted(&self) -> bool {
+        self.reader.is_encrypted()
+    }
+
+    ///
+    /// Enable encryption when reading the archive, using the given passphrase.
+    ///
+    pub fn enable_encryption(&mut self, password: &str) -> Result<(), Error> {
+        self.reader.enable_encryption(password)
+    }
+
+    // Retrieve the next entry from the manifest, reading the next manifest if
+    // needed, and skipping content once the end of the manifest is reached.
+    // Once the end of the input is reached, returns `Ok(None)` indefinitely.
+    fn get_next_entry(&mut self) -> Result<Option<Entry>, Error> {
+        loop {
+            match self.entries_remaining.take() {
+                Some(0) => {
+                    // throw away the compressed content since we are only listing
+                    self.reader.read_content()?;
+                }
+                Some(remaining) => {
+                    // get the next entry from the manifest
+                    let entry_rows = self.reader.read_next_entry()?;
+                    let mut entry = Entry::try_from(entry_rows)?;
+                    if let Some(dir_id) = entry.dir_id {
+                        let entry_parent = entry.parent.unwrap_or(0);
+                        self.path_builder
+                            .insert(dir_id, entry_parent, entry.name.clone());
+                    }
+                    if let Some(parent) = entry.parent {
+                        let mut fullpath = self.path_builder.get_full_path(parent)?;
+                        fullpath = fullpath.join(entry.name);
+                        entry.name = fullpath.to_string_lossy().to_string();
+                    }
+                    self.entries_remaining = Some(remaining - 1);
+
+                    // return unique paths, since a file may be split across
+                    // more than one content, we will see its entry again
+                    let hash = calculate_hash(&entry.name);
+                    if !self.visited.contains(&hash) {
+                        self.visited.insert(hash);
+                        return Ok(Some(entry));
+                    }
+                }
+                None => {
+                    // try to read the next manifest
+                    if let Some(manifest) = self.reader.read_next_manifest()? {
+                        self.entries_remaining = Some(manifest.num_entries);
+                    } else {
+                        // reached the end of the file
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Iterator for Entries {
+    type Item = Result<Entry, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.get_next_entry() {
+            Ok(None) => None,
+            Ok(some) => some.map(|e| Ok(e)),
+            Err(err) => Some(Err(err)),
         }
     }
 }

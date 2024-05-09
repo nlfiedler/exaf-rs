@@ -1,18 +1,12 @@
 * Action Plan
-** TODO implement =Reader.entries()= that returns an iterator
-** TODO add an =extract()= to the iterator item
-*** =extract()= should work for files, links, and directories
-** TODO add =extract_all()= to =Reader=
-** TODO add =extract_one()= to =Reader= that will extract a file, link, or directory
-** TODO test: unit test that creates and extracts the =tiny_tree= set
 ** TODO add API for adding a part of a file (~file slice~)
 *** add a new =Kind= called =Slice=
 *** this can be used when chunking large files in which not all chunks are archived
 *** provide the file path, offset, size, and a ~name~ for the slice (e.g. checksum)
 *** on extraction the slice will be written to disk using ~name~
-** TODO find a way to implement =cargo install= for easy installation of the binary
 ** TODO running =list= subcommand through =head= results in a ~broken pipe~ error
 ** TODO write examples and API documentation
+** TODO file bugs on github for anything remaining in this todo and delete this file
 ** nice-to-have: save and restore file metadata if option is given
 *** do not do this by default, as it almost certainly would not work anyway
 *** if ~itempos~ is non-zero, file metadata should not be serialized to the block

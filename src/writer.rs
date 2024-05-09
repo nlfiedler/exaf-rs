@@ -82,11 +82,11 @@ impl<W: Write + Seek> PackBuilder<W> {
     /// Enable encryption when building this archive, using the given passphrase.
     ///
     pub fn enable_encryption(
-        mut self,
+        &mut self,
         kd: KeyDerivation,
         ea: Encryption,
         password: &str,
-    ) -> Result<Self, Error> {
+    ) -> Result<(), Error> {
         if self.prev_dir_id > 0 || self.prev_file_id > 0 {
             return Err(Error::InternalError("pack must be empty".into()));
         }
@@ -102,7 +102,7 @@ impl<W: Write + Seek> PackBuilder<W> {
         header.add_u8(TAG_KEY_DERIV, kd.into())?;
         header.add_bytes(TAG_SALT, &salt)?;
         write_archive_header(&mut self.output, Some(header))?;
-        Ok(self)
+        Ok(())
     }
 
     ///

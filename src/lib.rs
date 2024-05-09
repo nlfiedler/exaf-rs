@@ -568,6 +568,56 @@ impl Entry {
     fn owners(self, _path: &Path) -> Self {
         self
     }
+
+    /// Name of the entry, will be the full path when returned from `Entries`.
+    pub fn name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    /// Unix file mode
+    pub fn mode(&self) -> Option<u32> {
+        self.mode
+    }
+
+    // Windows file attributes
+    pub fn attrs(&self) -> Option<u32> {
+        self.attrs
+    }
+
+    // Unix user identifier
+    pub fn uid(&self) -> Option<u32> {
+        self.uid
+    }
+
+    // name of the owning user
+    pub fn user(&self) -> Option<&String> {
+        self.user.as_ref()
+    }
+
+    // Unix group identifier
+    pub fn gid(&self) -> Option<u32> {
+        self.gid
+    }
+
+    // name of the owning group
+    pub fn group(&self) -> Option<&String> {
+        self.group.as_ref()
+    }
+
+    // created time
+    pub fn ctime(&self) -> Option<DateTime<Utc>> {
+        self.ctime
+    }
+
+    // modification time
+    pub fn mtime(&self) -> Option<DateTime<Utc>> {
+        self.mtime
+    }
+
+    // last accessed time
+    pub fn atime(&self) -> Option<DateTime<Utc>> {
+        self.atime
+    }
 }
 
 ///
@@ -787,6 +837,171 @@ mod tests {
         let plain = decrypt_data(&Encryption::AES256GCM, &secret, &cipher, &nonce)?;
         // the part that matters -- the data can make the roundtrip
         assert_eq!(plain, input.as_bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn test_create_list_extract() -> Result<(), Error> {
+        // create the archive
+        let outdir = tempdir()?;
+        let archive = outdir.path().join("archive.exa");
+        let output = std::fs::File::create(&archive)?;
+        let mut builder = super::writer::PackBuilder::new(output)?;
+        builder.add_dir_all("test/fixtures/version1/tiny_tree")?;
+        builder.finish()?;
+
+        // verify the entries appear as expected
+        let reader = super::reader::Entries::new(&archive)?;
+        let mut entries: Vec<String> = reader
+            .filter_map(|e| e.ok())
+            .map(|e| e.name().to_owned())
+            .collect();
+        entries.sort();
+        assert_eq!(entries.len(), 9);
+        let expected: Vec<String> = vec![
+            "tiny_tree".into(),
+            "tiny_tree/file-a.txt".into(),
+            "tiny_tree/file-b.txt".into(),
+            "tiny_tree/file-c.txt".into(),
+            "tiny_tree/link-to-c".into(),
+            "tiny_tree/sub".into(),
+            "tiny_tree/sub/empty-dir".into(),
+            "tiny_tree/sub/empty-file".into(),
+            "tiny_tree/sub/file-1.txt".into(),
+        ];
+        for (a, b) in entries.iter().zip(expected.iter()) {
+            assert_eq!(a, b);
+        }
+
+        // extract the archive and verify everything
+        let mut reader = super::reader::from_file(&archive)?;
+        reader.extract_all(outdir.path())?;
+
+        // the symbolic link (has expected bytes)
+        let link = outdir.path().join("tiny_tree").join("link-to-c");
+        let link_bytes = read_link(&link)?;
+        let expected_link: Vec<u8> = "file-c.txt".as_bytes().to_vec();
+        assert_eq!(link_bytes, expected_link);
+
+        // the empty directory (should exist)
+        let empty_dir = outdir
+            .path()
+            .join("tiny_tree")
+            .join("sub")
+            .join("empty-dir");
+        let metadata = std::fs::metadata(&empty_dir)?;
+        assert!(metadata.is_dir());
+
+        // the empty file (is empty)
+        let empty_file = outdir
+            .path()
+            .join("tiny_tree")
+            .join("sub")
+            .join("empty-file");
+        let metadata = std::fs::metadata(&empty_file)?;
+        assert_eq!(metadata.len(), 0);
+
+        // the other files (have expected content)
+        let actual = std::fs::read_to_string(outdir.path().join("tiny_tree").join("file-a.txt"))?;
+        assert_eq!(actual, "mary had a little lamb\n");
+        let actual = std::fs::read_to_string(outdir.path().join("tiny_tree").join("file-b.txt"))?;
+        assert_eq!(actual, "whose fleece was white as snow\n");
+        let actual = std::fs::read_to_string(outdir.path().join("tiny_tree").join("file-c.txt"))?;
+        assert_eq!(actual, "and everywhere that Mary went\n");
+        let actual = std::fs::read_to_string(
+            outdir
+                .path()
+                .join("tiny_tree")
+                .join("sub")
+                .join("file-1.txt"),
+        )?;
+        assert_eq!(actual, "the lamb was sure to go.\n");
+        Ok(())
+    }
+
+    #[test]
+    fn test_create_list_extract_encryption() -> Result<(), Error> {
+        // create the archive
+        let outdir = tempdir()?;
+        let archive = outdir.path().join("archive.exa");
+        let output = std::fs::File::create(&archive)?;
+        let mut builder = super::writer::PackBuilder::new(output)?;
+        builder.enable_encryption(
+            super::KeyDerivation::Argon2id,
+            super::Encryption::AES256GCM,
+            "Passw0rd!",
+        )?;
+        builder.add_dir_all("test/fixtures/version1/tiny_tree")?;
+        builder.finish()?;
+
+        // verify the entries appear as expected
+        let mut reader = super::reader::Entries::new(&archive)?;
+        reader.enable_encryption("Passw0rd!")?;
+        let mut entries: Vec<String> = reader
+            .filter_map(|e| e.ok())
+            .map(|e| e.name().to_owned())
+            .collect();
+        entries.sort();
+        assert_eq!(entries.len(), 9);
+        let expected: Vec<String> = vec![
+            "tiny_tree".into(),
+            "tiny_tree/file-a.txt".into(),
+            "tiny_tree/file-b.txt".into(),
+            "tiny_tree/file-c.txt".into(),
+            "tiny_tree/link-to-c".into(),
+            "tiny_tree/sub".into(),
+            "tiny_tree/sub/empty-dir".into(),
+            "tiny_tree/sub/empty-file".into(),
+            "tiny_tree/sub/file-1.txt".into(),
+        ];
+        for (a, b) in entries.iter().zip(expected.iter()) {
+            assert_eq!(a, b);
+        }
+
+        // extract the archive and verify everything
+        let mut reader = super::reader::from_file(&archive)?;
+        reader.enable_encryption("Passw0rd!")?;
+        reader.extract_all(outdir.path())?;
+
+        // the symbolic link (has expected bytes)
+        let link = outdir.path().join("tiny_tree").join("link-to-c");
+        let link_bytes = read_link(&link)?;
+        let expected_link: Vec<u8> = "file-c.txt".as_bytes().to_vec();
+        assert_eq!(link_bytes, expected_link);
+
+        // the empty directory (should exist)
+        let empty_dir = outdir
+            .path()
+            .join("tiny_tree")
+            .join("sub")
+            .join("empty-dir");
+        let metadata = std::fs::metadata(&empty_dir)?;
+        assert!(metadata.is_dir());
+
+        // the empty file (is empty)
+        let empty_file = outdir
+            .path()
+            .join("tiny_tree")
+            .join("sub")
+            .join("empty-file");
+        let metadata = std::fs::metadata(&empty_file)?;
+        assert_eq!(metadata.len(), 0);
+
+        // the other files (have expected content)
+        let actual = std::fs::read_to_string(outdir.path().join("tiny_tree").join("file-a.txt"))?;
+        assert_eq!(actual, "mary had a little lamb\n");
+        let actual = std::fs::read_to_string(outdir.path().join("tiny_tree").join("file-b.txt"))?;
+        assert_eq!(actual, "whose fleece was white as snow\n");
+        let actual = std::fs::read_to_string(outdir.path().join("tiny_tree").join("file-c.txt"))?;
+        assert_eq!(actual, "and everywhere that Mary went\n");
+        let actual = std::fs::read_to_string(
+            outdir
+                .path()
+                .join("tiny_tree")
+                .join("sub")
+                .join("file-1.txt"),
+        )?;
+        assert_eq!(actual, "the lamb was sure to go.\n");
         Ok(())
     }
 }

@@ -24,7 +24,7 @@ fn create_archive<P: AsRef<Path>>(
     let output = File::create(path)?;
     let mut builder = PackBuilder::new(output)?;
     if let Some(password) = passwd {
-        builder = builder.enable_encryption(
+        builder.enable_encryption(
             exaf_rs::KeyDerivation::Argon2id,
             exaf_rs::Encryption::AES256GCM,
             password,
@@ -47,19 +47,25 @@ fn create_archive<P: AsRef<Path>>(
 }
 
 ///
-/// List all file entries in the archive in breadth-first order.
+/// List all file entries in the archive.
 ///
 fn list_contents<P: AsRef<Path>>(archive: P, passwd: Option<&str>) -> Result<(), Error> {
-    let mut reader = exaf_rs::reader::from_file(archive)?;
+    let mut reader = exaf_rs::reader::Entries::new(archive)?;
     if reader.is_encrypted() && passwd.is_none() {
         Err(Error::Usage(
             "Archive is encrypted, use --password to provide one.".into(),
         ))
     } else {
         if let Some(password) = passwd {
-            reader = reader.enable_encryption(password)?;
+            reader.enable_encryption(password)?;
         }
-        exaf_rs::reader::list_entries(&mut reader)
+        for result in reader {
+            match result {
+                Ok(entry) => println!("{}", entry.name()),
+                Err(err) => println!("error: {}", err),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -74,9 +80,10 @@ fn extract_contents<P: AsRef<Path>>(archive: P, passwd: Option<&str>) -> Result<
         ))
     } else {
         if let Some(password) = passwd {
-            reader = reader.enable_encryption(password)?;
+            reader.enable_encryption(password)?;
         }
-        exaf_rs::reader::extract_entries(&mut reader)
+        let path = std::env::current_dir()?;
+        reader.extract_all(&path)
     }
 }
 
