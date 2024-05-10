@@ -1,24 +1,4 @@
-* Action Plan
-** TODO file bugs on github for anything remaining in this todo and delete this file
-** bug: running =list= subcommand through =head= results in a ~broken pipe~ error
-** nice-to-have: save and restore file metadata if option is given
-*** do not do this by default, as it almost certainly would not work anyway
-*** if ~itempos~ is non-zero, file metadata should not be serialized to the block
-** nice-to-have: add files to an existing archive
-*** must build up mapping of full paths to parent rowid
-*** must determine the highest directory identifier so far
-*** if adding a file in a new directory, add dir entry with highest id + 1
-*** if adding a file to an existing directory, use that dir id as the parent
-** nice-to-have: usage errors should be displayed nicely
-*** not providing a password when one is required
-*** providing the wrong password
-** nice-to-have: include/exclude filters for create, list, and extract operations
-** nice-to-have: option to add ~associated data~ when encrypting file with AEAD
-** nice-to-have: check if compressed block is smaller, otherwise keep original data
-** nice-to-have: sort incoming files by type (image vs text) to afford better compression
-*** if files of a similar nature are grouped together, compression should yield better results
-** nice-to-have: retain extended file attributes
-*** need to record the names and raw values in some form of map
+* Action Items
 * Benchmarks
 ** Apache HTTPD 2.4.59 source
 *** Ubuntu 22.04 VM, 8 Xeon X5550 2.67 GHz cores, 8 GB RAM, HDD
