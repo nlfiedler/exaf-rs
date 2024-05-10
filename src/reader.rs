@@ -1,6 +1,18 @@
 //
 // Copyright (c) 2024 Nathan Fiedler
 //
+
+//!
+//! Read an archive, decrypting and decompressing as needed.
+//!
+//! The `reader` module provides the functions needed to read an archive which
+//! may have optional encryption enabled. The `Entries` iterator provides a
+//! simple means of examining all of the entries contained in the archive.
+//! 
+//! To extract the contents of the archive, use the `extract_all()` function of
+//! the `Reader` implementation.
+//!
+
 use super::*;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -454,6 +466,10 @@ impl<R: Read + Seek> VersionedReader for ReaderV1<R> {
 /// Generic archive reader that returns manifest headers, entry headers, and
 /// compressed output.
 ///
+/// The caller should check if the archive is encrypted by calling the
+/// `is_encrypted()` function, and if it returns `true`, then call
+/// `enable_encryption()` with a password provided by the user.
+///
 pub struct Reader {
     // underlying reader for a specific file format
     reader: Box<dyn VersionedReader>,
@@ -831,6 +847,20 @@ impl Iterator for Entries {
 
 ///
 /// Create a `Reader` from the given file.
+///
+/// ```no_run
+/// # let passwd: Option<&str> = None;
+/// let mut reader = exaf_rs::reader::from_file("archive.exa").expect("from file");
+/// if reader.is_encrypted() && passwd.is_none() {
+///     println!("Archive is encrypted, please provide a password.");
+/// } else {
+///     if let Some(password) = passwd {
+///         reader.enable_encryption(password).expect("enable crypto");
+///     }
+///     let path = std::env::current_dir().expect("no env?");
+///     reader.extract_all(&path).expect("extract all");
+/// }
+/// ```
 ///
 pub fn from_file<P: AsRef<Path>>(infile: P) -> Result<Reader, Error> {
     let mut input = File::open(infile)?;

@@ -1,7 +1,6 @@
 * Action Plan
-** TODO running =list= subcommand through =head= results in a ~broken pipe~ error
-** TODO write examples and API documentation
 ** TODO file bugs on github for anything remaining in this todo and delete this file
+** bug: running =list= subcommand through =head= results in a ~broken pipe~ error
 ** nice-to-have: save and restore file metadata if option is given
 *** do not do this by default, as it almost certainly would not work anyway
 *** if ~itempos~ is non-zero, file metadata should not be serialized to the block

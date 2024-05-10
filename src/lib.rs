@@ -1,6 +1,63 @@
 //
 // Copyright (c) 2024 Nathan Fiedler
 //
+
+//!
+//! The `exaf_rs` crate implements the EXtensible Archiver Format and is
+//! intended to be used in compressing and archiving files. It offers an
+//! alternative to the well-known zip and 7-zip formats, with extensibility in
+//! mind. The running time of this reference implementation is similar to that
+//! of GNU tar with Zstandard compression, and the resulting file size is very
+//! similar.
+//!
+//! ## Examples
+//!
+//! To create an archive, use the `Writer` to add files, directories, and
+//! symbolic links. It also can add an entire directory tree in one call.
+//!
+//! ```no_run
+//! # use std::fs::File;
+//! use exaf_rs::writer::Writer;
+//!
+//! let output = File::create("archive.exa").expect("create file");
+//! let mut writer = Writer::new(output).expect("new writer");
+//! writer.add_dir_all("important-docs").expect("add dir all");
+//!
+//! // You must call finish() in order to flush everything to the output.
+//! writer.finish().expect("finish");
+//! ```
+//!
+//! The code to list the entries of an archive might look like this (this
+//! example assumes that the archive is not encrypted):
+//!
+//! ```no_run
+//! let mut reader = exaf_rs::reader::Entries::new("archive.exa").expect("new entries");
+//! for result in reader {
+//!     match result {
+//!         Ok(entry) => println!("{}", entry.name()),
+//!         Err(err) => println!("error: {}", err),
+//!     }
+//! }
+//! ```
+//!
+//! To extract everything within the archive, which may be encrypted, use the
+//! `Reader` like so:
+//!
+//! ```no_run
+//! # let passwd: Option<&str> = None;
+//! let mut reader = exaf_rs::reader::from_file("archive.exa").expect("from file");
+//! if reader.is_encrypted() && passwd.is_none() {
+//!     println!("Archive is encrypted, please provide a password.");
+//! } else {
+//!     if let Some(password) = passwd {
+//!         reader.enable_encryption(password).expect("enable crypto");
+//!     }
+//!     let path = std::env::current_dir().expect("no env?");
+//!     reader.extract_all(&path).expect("extract all");
+//! }
+//! ```
+//!
+
 use chrono::prelude::*;
 use std::fmt;
 use std::fs;
@@ -294,7 +351,9 @@ impl TryFrom<u8> for Compression {
 ///
 #[derive(Clone, Debug, PartialEq)]
 pub enum Encryption {
+    /// No encryption; _default_
     None,
+    /// Use the AES 256 bit GCM AEAD cipher.
     AES256GCM,
 }
 
@@ -333,7 +392,9 @@ impl TryFrom<u8> for Encryption {
 ///
 #[derive(Clone, Debug, PartialEq)]
 pub enum KeyDerivation {
+    /// No derivation function, _default_
     None,
+    /// Use the Argon2id KDF
     Argon2id,
 }
 
@@ -386,7 +447,7 @@ impl KeyDerivationParams {
     ///
     /// Set the time cost from the optional value found in the archive.
     ///
-    fn time_cost(mut self, time_cost: Option<u32>) -> Self {
+    pub fn time_cost(mut self, time_cost: Option<u32>) -> Self {
         if let Some(tc) = time_cost {
             self.time_cost = tc;
         }
@@ -396,7 +457,7 @@ impl KeyDerivationParams {
     ///
     /// Set the memory cost from the optional value found in the archive.
     ///
-    fn mem_cost(mut self, mem_cost: Option<u32>) -> Self {
+    pub fn mem_cost(mut self, mem_cost: Option<u32>) -> Self {
         if let Some(tc) = mem_cost {
             self.mem_cost = tc;
         }
@@ -407,7 +468,7 @@ impl KeyDerivationParams {
     /// Set the degree of parallelism from the optional value found in the
     /// archive.
     ///
-    fn para_cost(mut self, para_cost: Option<u32>) -> Self {
+    pub fn para_cost(mut self, para_cost: Option<u32>) -> Self {
         if let Some(tc) = para_cost {
             self.para_cost = tc;
         }
@@ -417,7 +478,7 @@ impl KeyDerivationParams {
     ///
     /// Set the output length from the optional value found in the archive.
     ///
-    fn tag_length(mut self, tag_length: Option<u32>) -> Self {
+    pub fn tag_length(mut self, tag_length: Option<u32>) -> Self {
         if let Some(tc) = tag_length {
             self.tag_length = tc;
         }
@@ -600,42 +661,42 @@ impl Entry {
         self.mode
     }
 
-    // Windows file attributes
+    /// Windows file attributes
     pub fn attrs(&self) -> Option<u32> {
         self.attrs
     }
 
-    // Unix user identifier
+    /// Unix user identifier
     pub fn uid(&self) -> Option<u32> {
         self.uid
     }
 
-    // name of the owning user
+    /// Name of the owning user
     pub fn user(&self) -> Option<&String> {
         self.user.as_ref()
     }
 
-    // Unix group identifier
+    /// Unix group identifier
     pub fn gid(&self) -> Option<u32> {
         self.gid
     }
 
-    // name of the owning group
+    /// Name of the owning group
     pub fn group(&self) -> Option<&String> {
         self.group.as_ref()
     }
 
-    // created time
+    /// Created time
     pub fn ctime(&self) -> Option<DateTime<Utc>> {
         self.ctime
     }
 
-    // modification time
+    /// Modification time
     pub fn mtime(&self) -> Option<DateTime<Utc>> {
         self.mtime
     }
 
-    // last accessed time
+    /// Last accessed time
     pub fn atime(&self) -> Option<DateTime<Utc>> {
         self.atime
     }
@@ -691,6 +752,13 @@ const TAG_INIT_VECTOR: u16 = 0x4956;
 const TAG_ENCRYPTED_SIZE: u16 = 0x4553;
 
 // Desired size of the compressed bundle of file data.
+//
+// For the unit tests, which all use fairly small files, make the bundle size
+// very small so that we can easily exercise the case of adding a file that
+// pushes into another manifest/content pair.
+#[cfg(test)]
+const BUNDLE_SIZE: u64 = 2048;
+#[cfg(not(test))]
 const BUNDLE_SIZE: u64 = 16777216;
 
 pub mod reader;
@@ -871,12 +939,13 @@ mod tests {
         let outdir = tempdir()?;
         let archive = outdir.path().join("archive.exa");
         let output = std::fs::File::create(&archive)?;
-        let mut builder = super::writer::PackBuilder::new(output)?;
+        let mut builder = super::writer::Writer::new(output)?;
         builder.add_dir_all("test/fixtures/version1/tiny_tree")?;
         builder.finish()?;
 
         // verify the entries appear as expected
         let reader = super::reader::Entries::new(&archive)?;
+        assert!(!reader.is_encrypted());
         let mut entries: Vec<String> = reader
             .filter_map(|e| e.ok())
             .map(|e| e.name().to_owned())
@@ -900,6 +969,7 @@ mod tests {
 
         // extract the archive and verify everything
         let mut reader = super::reader::from_file(&archive)?;
+        assert!(!reader.is_encrypted());
         reader.extract_all(outdir.path())?;
 
         // the symbolic link (has expected bytes)
@@ -950,7 +1020,7 @@ mod tests {
         let outdir = tempdir()?;
         let archive = outdir.path().join("archive.exa");
         let output = std::fs::File::create(&archive)?;
-        let mut builder = super::writer::PackBuilder::new(output)?;
+        let mut builder = super::writer::Writer::new(output)?;
         builder.enable_encryption(
             super::KeyDerivation::Argon2id,
             super::Encryption::AES256GCM,
@@ -961,6 +1031,7 @@ mod tests {
 
         // verify the entries appear as expected
         let mut reader = super::reader::Entries::new(&archive)?;
+        assert!(reader.is_encrypted());
         reader.enable_encryption("Passw0rd!")?;
         let mut entries: Vec<String> = reader
             .filter_map(|e| e.ok())
@@ -985,6 +1056,7 @@ mod tests {
 
         // extract the archive and verify everything
         let mut reader = super::reader::from_file(&archive)?;
+        assert!(reader.is_encrypted());
         reader.enable_encryption("Passw0rd!")?;
         reader.extract_all(outdir.path())?;
 

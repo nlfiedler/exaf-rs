@@ -22,7 +22,7 @@ fn create_archive<P: AsRef<Path>>(
         None => path_ref.with_extension("exa"),
     };
     let output = File::create(path)?;
-    let mut builder = PackBuilder::new(output)?;
+    let mut builder = Writer::new(output)?;
     if let Some(password) = passwd {
         builder.enable_encryption(
             exaf_rs::KeyDerivation::Argon2id,

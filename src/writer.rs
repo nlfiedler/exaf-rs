@@ -1,6 +1,49 @@
 //
 // Copyright (c) 2024 Nathan Fiedler
 //
+
+//!
+//! Create compressed archives to contain files, directories, and symbolic
+//! links.
+//!
+//! To create an archive, use the `Writer` to add files, directories, and
+//! symbolic links. It also can add an entire directory tree in one call.
+//!
+//! ```no_run
+//! # use std::fs::File;
+//! use exaf_rs::writer::Writer;
+//!
+//! let output = File::create("archive.exa").expect("create file");
+//! let mut writer = Writer::new(output).expect("new writer");
+//! writer.add_dir_all("important-docs").expect("add dir all");
+//!
+//! // You must call finish() in order to flush everything to the output.
+//! writer.finish().expect("finish");
+//! ```
+//!
+//! To create an encrypted archive, you will need to have a password and specify
+//! the key derivation function and encryption algorithm.
+//!
+//! ```no_run
+//! # use std::fs::File;
+//! use exaf_rs::writer::Writer;
+//!
+//! let output = File::create("archive.exa").expect("create file");
+//! let mut writer = Writer::new(output).expect("new writer");
+//! writer.enable_encryption(
+//!     exaf_rs::KeyDerivation::Argon2id,
+//!     exaf_rs::Encryption::AES256GCM,
+//!     "correct horse battery staple",
+//! ).expect("enable crypto");
+//!
+//! // add files and directories...
+//! writer.add_dir_all("important-docs").expect("add dir all");
+//!
+//! // You must call finish() in order to flush everything to the output.
+//! writer.finish().expect("finish");
+//! ```
+//!
+
 use super::*;
 use std::collections::HashMap;
 use std::fs;
@@ -29,9 +72,9 @@ struct IncomingContent {
 }
 
 ///
-/// Creates or updates an archive.
+/// Creates an archive.
 ///
-pub struct PackBuilder<W: Write + Seek> {
+pub struct Writer<W: Write + Seek> {
     // output to which archive will be written
     output: W,
     // identifier of the most recent directory entry
@@ -57,9 +100,9 @@ pub struct PackBuilder<W: Write + Seek> {
     secret_key: Option<Vec<u8>>,
 }
 
-impl<W: Write + Seek> PackBuilder<W> {
+impl<W: Write + Seek> Writer<W> {
     ///
-    /// Construct a new `PackBuilder` that will operate entirely in memory.
+    /// Construct a new `Writer` that will operate entirely in memory.
     ///
     pub fn new(mut output: W) -> Result<Self, Error> {
         write_archive_header(&mut output, None)?;
@@ -161,7 +204,7 @@ impl<W: Write + Seek> PackBuilder<W> {
     ///
     /// Add directory entry to the manifest, returning the new directory identifier.
     ///
-    fn add_directory<P: AsRef<Path>>(&mut self, path: P, parent: u32) -> Result<u32, Error> {
+    pub fn add_directory<P: AsRef<Path>>(&mut self, path: P, parent: u32) -> Result<u32, Error> {
         self.prev_dir_id += 1;
         let mut dir_entry = Entry::new(path);
         dir_entry.dir_id = Some(self.prev_dir_id);
@@ -273,6 +316,10 @@ impl<W: Write + Seek> PackBuilder<W> {
     ///
     /// Depending on the size of the slice and the content bundle so far, this
     /// may result in writing one or more manifest/content pairs to the output.
+    ///
+    /// Upon extraction, the file will have the name given and will have a
+    /// length of `length` bytes. That is, only the slice is restored upon
+    /// extraction.
     ///
     /// **Note:** Remember to call `finish()` when done adding content.
     ///
@@ -798,12 +845,34 @@ mod tests {
     }
 
     #[test]
+    fn test_create_archive_big_content() -> Result<(), Error> {
+        // add a file that is larger than the BUNDLE_SIZE when configured for
+        // testing (2048 bytes), forcing a different code path for add_file()
+        //
+        // create the archive
+        let outdir = tempdir()?;
+        let archive = outdir.path().join("archive.exa");
+        let output = std::fs::File::create(&archive)?;
+        let mut builder = super::writer::Writer::new(output)?;
+        builder.add_file("test/fixtures/IMG_0385.JPG", None)?;
+        builder.finish()?;
+
+        // extract the archive and verify everything
+        let mut reader = super::reader::from_file(&archive)?;
+        reader.extract_all(outdir.path())?;
+        let actual = sha1_from_file(outdir.path().join("IMG_0385.JPG").as_path())?;
+        assert_eq!(actual, "98074ad81e1ddac384cfcd23144109d4d6baa5f2");
+
+        Ok(())
+    }
+
+    #[test]
     fn test_create_archive_file_slice() -> Result<(), Error> {
         // create the archive
         let outdir = tempdir()?;
         let archive = outdir.path().join("archive.exa");
         let output = std::fs::File::create(&archive)?;
-        let mut builder = super::writer::PackBuilder::new(output)?;
+        let mut builder = super::writer::Writer::new(output)?;
         builder.add_file_slice(
             "test/fixtures/IMG_0385.JPG",
             "5ba33678260abc495b6c77003ddab5cc613b9ba7",

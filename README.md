@@ -22,7 +22,7 @@ First and foremost, the purpose of this project is to satisfy my own needs, and 
 
 ### Running the tests
 
-Basic unit tests are available that exercise most of the functionality.
+Unit tests exist that exercise most of the functionality.
 
 ```shell
 cargo test
@@ -60,6 +60,20 @@ Finally, run `extract` to unpack the contents of the archive into the current di
 $ cargo run -- extract archive.exa
 ...
 Extracted 3138 files from archive.exa
+```
+
+### Code Coverage
+
+Using [grcov](https://github.com/mozilla/grcov) seems to be the easiest at this time.
+
+```shell
+export RUSTFLAGS="-Cinstrument-coverage"
+export LLVM_PROFILE_FILE="exaf_rs-%p-%m.profraw"
+cargo clean
+cargo build
+cargo test
+grcov . -s . --binary-path ./target/debug/ -t html --branch --ignore-not-existing -o ./target/debug/coverage/
+open target/debug/coverage/index.html
 ```
 
 ## Encryption
