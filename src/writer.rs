@@ -71,12 +71,49 @@ struct IncomingContent {
     size: u64,
 }
 
+pub struct Options {
+    /// Save the file size to the archive as `LN` row.
+    file_size: bool,
+    /// Save file metadata for files, links, and directories.
+    metadata: bool,
+}
+
+impl Options {
+    /// Construct a new default options.
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    /// Set the file size option to the given value (`true` to save file size).
+    pub fn file_size(mut self, value: bool) -> Self {
+        self.file_size = value;
+        self
+    }
+
+    /// Set the metadata option to the given value (`true` to save metadata).
+    pub fn metadata(mut self, value: bool) -> Self {
+        self.metadata = value;
+        self
+    }
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            file_size: false,
+            metadata: false,
+        }
+    }
+}
+
 ///
 /// Creates an archive.
 ///
 pub struct Writer<W: Write + Seek> {
     // output to which archive will be written
     output: W,
+    // options when building the archive
+    options: Options,
     // identifier of the most recent directory entry
     prev_dir_id: u32,
     // directories to be written in the pending manifest
@@ -102,12 +139,20 @@ pub struct Writer<W: Write + Seek> {
 
 impl<W: Write + Seek> Writer<W> {
     ///
-    /// Construct a new `Writer` that will operate entirely in memory.
+    /// Construct a `Writer` with default options.
     ///
-    pub fn new(mut output: W) -> Result<Self, Error> {
+    pub fn new(output: W) -> Result<Self, Error> {
+        Writer::with_options(output, Default::default())
+    }
+
+    ///
+    /// Construct a new `Writer` with the specified options.
+    ///
+    pub fn with_options(mut output: W, options: Options) -> Result<Self, Error> {
         write_archive_header(&mut output, None)?;
         Ok(Self {
             output,
+            options,
             prev_dir_id: 0,
             directories: vec![],
             prev_file_id: 0,
@@ -228,13 +273,13 @@ impl<W: Write + Seek> Writer<W> {
         self.prev_file_id += 1;
         let mut file_entry = Entry::new(path.as_ref());
         file_entry.parent = parent;
-        self.files.insert(self.prev_file_id, file_entry);
-
         let md = fs::metadata(path.as_ref());
         let file_len = match md.as_ref() {
             Ok(attr) => attr.len(),
             Err(_) => 0,
         };
+        file_entry.size = Some(file_len);
+        self.files.insert(self.prev_file_id, file_entry);
         // empty files will result in a manifest entry whose size is zero,
         // allowing for the extraction process to know to create an empty file
         // (otherwise it is difficult to tell from the available data)
@@ -289,13 +334,13 @@ impl<W: Write + Seek> Writer<W> {
         self.prev_file_id += 1;
         let mut file_entry = Entry::new(path.as_ref());
         file_entry.parent = parent;
-        self.files.insert(self.prev_file_id, file_entry);
-
         let md = fs::symlink_metadata(path.as_ref());
         let link_len = match md.as_ref() {
             Ok(attr) => attr.len(),
             Err(_) => 0,
         };
+        file_entry.size = Some(link_len);
+        self.files.insert(self.prev_file_id, file_entry);
         // assume that the link value is relatively small and simply add it into
         // the current content bundle in whole
         let content = IncomingContent {
@@ -334,6 +379,7 @@ impl<W: Write + Seek> Writer<W> {
         self.prev_file_id += 1;
         let mut file_entry = Entry::with_name(name);
         file_entry.parent = parent;
+        file_entry.size = Some(length as u64);
         self.files.insert(self.prev_file_id, file_entry);
 
         let mut itempos: u64 = offset;
@@ -430,7 +476,9 @@ impl<W: Write + Seek> Writer<W> {
         for dir_entry in self.directories.iter() {
             let mut header = HeaderBuilder::new();
             add_directory_rows(&dir_entry, &mut header)?;
-            // add_metadata_rows(&dir_entry, &mut header)?;
+            if self.options.metadata {
+                add_metadata_rows(&dir_entry, &mut header)?;
+            }
             header.write_header(&mut output)?;
         }
 
@@ -443,7 +491,17 @@ impl<W: Write + Seek> Writer<W> {
                 .expect("internal error, missing file entry for item content");
             let mut header = HeaderBuilder::new();
             add_file_rows(&file_entry, &mut header)?;
-            // add_metadata_rows(&file_entry, &mut header)?;
+            if content.itempos == 0 {
+                // optionally write the file size and metadata to the header,
+                // but only if this is the first time this entry is being
+                // written to a manifest (i.e. do not repeat later)
+                if self.options.file_size {
+                    add_size_row(&file_entry, &mut header)?;
+                }
+                if self.options.metadata {
+                    add_metadata_rows(&file_entry, &mut header)?;
+                }
+            }
             add_content_rows(&content, &mut header)?;
             header.write_header(&mut output)?;
         }
@@ -473,7 +531,7 @@ impl<W: Write + Seek> Writer<W> {
 }
 
 fn write_archive_header<W: Write>(mut output: W, rows: Option<HeaderBuilder>) -> Result<(), Error> {
-    let version = [b'E', b'X', b'A', b'F', 1, 0];
+    let version = [b'E', b'X', b'A', b'F', 1, 1];
     output.write_all(&version)?;
     if let Some(header) = rows {
         header.write_header(output)?;
@@ -633,7 +691,6 @@ fn make_manifest_header(num_entries: u32, block_size: usize) -> Result<HeaderBui
 }
 
 // Inject the metadata rows into the header.
-#[allow(dead_code)]
 fn add_metadata_rows(entry: &Entry, header: &mut HeaderBuilder) -> Result<(), Error> {
     if let Some(mode) = entry.mode {
         header.add_u32(TAG_UNIX_MODE, mode)?;
@@ -689,6 +746,14 @@ fn add_file_rows(entry: &Entry, header: &mut HeaderBuilder) -> Result<(), Error>
     }
     if let Some(parent) = entry.parent {
         header.add_u32(TAG_PARENT, parent)?;
+    }
+    Ok(())
+}
+
+// Add the header row for the file/link size, if set, to the header builder.
+fn add_size_row(entry: &Entry, header: &mut HeaderBuilder) -> Result<(), Error> {
+    if let Some(size) = entry.size {
+        header.add_u64(TAG_FILE_SIZE, size)?;
     }
     Ok(())
 }

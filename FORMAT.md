@@ -89,12 +89,12 @@ Every Exaf archive starts with a magic number, version, and number of optional h
 |      2 |  `A`  |
 |      3 |  `F`  |
 |      4 | `0x01` |
-|      5 | `0x00` |
+|      5 | `0x01` |
 |      6 | vary  |
 |      7 | vary  |
 
 * The first four bytes are the UTF-8 encoded characters `EXAF` which act as the _magic number_ value.
-* Offsets 4 and 5 represent the **major** and **minor** version of the file format, initially 1.0.
+* Offsets 4 and 5 represent the **major** and **minor** version of the file format, currently **1.1**.
 * Offsets 6 and 7 indicate the number of rows of tag/size/value tuples that follow.
     - If the archive header is empty, the bytes at offsets 6 and 7 will be `0`.
 
@@ -190,6 +190,7 @@ File entries will have this format:
 | ---- | -------- | ----------------------------------- | --------- | ----- |
 | `NM` |   65,535 | name of file                        | yes       | `str` |
 | `PA` |        4 | identifier of parent directory      |           | `u32` |
+| `LN` |        8 | total length of file in bytes       |           | `u64` |
 | `MO` |        4 | Unix mode                           |           | `u32` |
 | `FA` |        4 | Windows file attributes             |           | `u32` |
 | `MT` |        8 | modification date/time as Unix time |           | `i64` |
@@ -202,6 +203,8 @@ File entries will have this format:
 
 As with directories, the `NM`, `UN`, and `GN` rows will almost certainly be much shorter than 64kb.
 
+As mentioned above, the `LN` and other metadata rows will likely only be present the first time the file appears in the archive, and should not be repeated in subsequent manifests if the file content spills over into another block.
+
 #### Symbolic Links
 
 Typically symbolic links do not have any metadata as it depends on the operating system, with FreeBSD being one such exception. If a link does have its own metadata, those values will be represented in the header in an identical manner to other directory and file entries.
@@ -210,6 +213,7 @@ Typically symbolic links do not have any metadata as it depends on the operating
 | ---- | -------- | ------------------------------ | --------- | ----- |
 | `SL` |   65,535 | name of symbolic link          | yes       | `str` |
 | `PA` |        4 | identifier of parent directory |           | `u32` |
+| `LN` |        8 | length of link content         |           | `u64` |
 
 Similar to files and directories, the `SL` row will almost certainly be much shorter than 64kb.
 
@@ -345,3 +349,13 @@ From the details above, we can infer several limits on the archive format:
 * Directory identifiers are encoded using 32-bits, so at most 4,294,967,295 directories can appear in a single archive.
 
 The content blocks have a size limit, but that is not relevant since the archive may have an unlimited number of content blocks, and as such the blocks can be sized to any reasonable length.
+
+## Revision History
+
+### Version 1.1
+
+* Added `LN` header row for files and links whose value is the total size of the file or link.
+
+### Version 1.0
+
+Initial release with directories, files, and symbolic links, basic metadata, compression using Zstandard, Argon2id KDF, AES256-GCM AEAD.

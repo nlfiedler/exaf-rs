@@ -509,6 +509,8 @@ pub struct Entry {
     dir_id: Option<u32>,
     // identifier of the parent directory
     parent: Option<u32>,
+    // size of the content for files and links
+    size: Option<u64>,
     // Unix file mode
     mode: Option<u32>,
     // Windows file attributes
@@ -568,6 +570,7 @@ impl Entry {
             is_link,
             dir_id: None,
             parent: None,
+            size: None,
             mode,
             attrs,
             uid: None,
@@ -590,6 +593,7 @@ impl Entry {
             is_link: false,
             dir_id: None,
             parent: None,
+            size: None,
             mode: None,
             attrs: None,
             uid: None,
@@ -654,6 +658,10 @@ impl Entry {
     /// Name of the entry, will be the full path when returned from `Entries`.
     pub fn name(&self) -> &str {
         self.name.as_str()
+    }
+
+    pub fn size(&self) -> Option<u64> {
+        self.size
     }
 
     /// Unix file mode
@@ -732,6 +740,7 @@ const TAG_BLOCK_SIZE: u16 = 0x4253;
 // tags for entry header rows
 const TAG_NAME: u16 = 0x4e4d;
 const TAG_PARENT: u16 = 0x5041;
+const TAG_FILE_SIZE: u16 = 0x4c4e;
 const TAG_DIRECTORY_ID: u16 = 0x4944;
 const TAG_UNIX_MODE: u16 = 0x4d4f;
 const TAG_FILE_ATTRS: u16 = 0x4641;
@@ -766,6 +775,8 @@ pub mod writer;
 
 #[cfg(test)]
 mod tests {
+    use crate::writer::Options;
+
     use super::*;
     use tempfile::tempdir;
 
@@ -1011,6 +1022,67 @@ mod tests {
                 .join("file-1.txt"),
         )?;
         assert_eq!(actual, "the lamb was sure to go.\n");
+        Ok(())
+    }
+
+    #[test]
+    fn test_create_list_file_size() -> Result<(), Error> {
+        // create the archive
+        let outdir = tempdir()?;
+        let archive = outdir.path().join("archive.exa");
+        let output = std::fs::File::create(&archive)?;
+        let options = Options::new().file_size(true);
+        let mut builder = super::writer::Writer::with_options(output, options)?;
+        builder.add_dir_all("test/fixtures/version1/tiny_tree")?;
+        builder.finish()?;
+
+        // verify the entries appear with file/link sizes
+        let reader = super::reader::Entries::new(&archive)?;
+        assert!(!reader.is_encrypted());
+        let mut entries: Vec<(String, Option<u64>)> = reader
+            .filter_map(|e| e.ok())
+            .map(|e| (e.name().to_owned(), e.size()))
+            .collect();
+        entries.sort();
+        assert_eq!(entries.len(), 9);
+        let expected: Vec<(String, Option<u64>)> = vec![
+            ("tiny_tree".into(), None),
+            ("tiny_tree/file-a.txt".into(), Some(23 as u64)),
+            ("tiny_tree/file-b.txt".into(), Some(31 as u64)),
+            ("tiny_tree/file-c.txt".into(), Some(30 as u64)),
+            ("tiny_tree/link-to-c".into(), Some(10 as u64)),
+            ("tiny_tree/sub".into(), None),
+            ("tiny_tree/sub/empty-dir".into(), None),
+            ("tiny_tree/sub/empty-file".into(), Some(0 as u64)),
+            ("tiny_tree/sub/file-1.txt".into(), Some(25 as u64)),
+        ];
+        for (a, b) in entries.iter().zip(expected.iter()) {
+            assert_eq!(a, b);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_create_list_metadata() -> Result<(), Error> {
+        // create the archive
+        let outdir = tempdir()?;
+        let archive = outdir.path().join("archive.exa");
+        let output = std::fs::File::create(&archive)?;
+        let options = Options::new().metadata(true);
+        let mut builder = super::writer::Writer::with_options(output, options)?;
+        builder.add_file("test/fixtures/version1/tiny_tree/file-a.txt", None)?;
+        builder.finish()?;
+
+        // verify the entries appear with metadata
+        let reader = super::reader::Entries::new(&archive)?;
+        assert!(!reader.is_encrypted());
+        for result in reader {
+            let entry = result?;
+            // probably only mtime is reliable across platforms
+            assert!(entry.mtime().is_some());
+        }
+
         Ok(())
     }
 

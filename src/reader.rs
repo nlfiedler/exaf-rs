@@ -8,7 +8,7 @@
 //! The `reader` module provides the functions needed to read an archive which
 //! may have optional encryption enabled. The `Entries` iterator provides a
 //! simple means of examining all of the entries contained in the archive.
-//! 
+//!
 //! To extract the contents of the archive, use the `extract_all()` function of
 //! the `Reader` implementation.
 //!
@@ -269,7 +269,6 @@ fn get_header_bytes(rows: &HeaderMap, key: &u16) -> Result<Option<Vec<u8>>, Erro
 ///
 /// Optional values read from the archive header.
 ///
-#[allow(dead_code)]
 struct ArchiveHeader {
     /// Encryption algorithm
     enc_algo: Encryption,
@@ -325,6 +324,7 @@ impl TryFrom<HeaderMap> for Entry {
         };
         let dir_id = get_header_u32(&value, &TAG_DIRECTORY_ID)?;
         let parent = get_header_u32(&value, &TAG_PARENT)?;
+        let size = get_header_u64(&value, &TAG_FILE_SIZE)?;
         let mode = get_header_u32(&value, &TAG_UNIX_MODE)?;
         let attrs = get_header_u32(&value, &TAG_FILE_ATTRS)?;
         let uid = get_header_u32(&value, &TAG_USER_ID)?;
@@ -339,6 +339,7 @@ impl TryFrom<HeaderMap> for Entry {
             is_link,
             dir_id,
             parent,
+            size,
             mode,
             attrs,
             uid,
@@ -870,7 +871,7 @@ pub fn from_file<P: AsRef<Path>>(infile: P) -> Result<Reader, Error> {
         return Err(Error::MissingMagic);
     }
     // for now, only know how to build version 1 readers
-    if archive_start[4..6] != [1, 0] {
+    if archive_start[4] != 1 {
         return Err(Error::UnsupportedVersion);
     }
     Reader::new(Box::new(ReaderV1::new(input)))
