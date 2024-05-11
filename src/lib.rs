@@ -770,6 +770,14 @@ const BUNDLE_SIZE: u64 = 2048;
 #[cfg(not(test))]
 const BUNDLE_SIZE: u64 = 16777216;
 
+///
+/// Return the size in bytes of the content block at which point a `Writer` will
+/// create a new manifest and content pair.
+///
+pub fn content_size() -> u64 {
+    BUNDLE_SIZE
+}
+
 pub mod reader;
 pub mod writer;
 
@@ -779,6 +787,11 @@ mod tests {
 
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn test_content_size() {
+        assert_eq!(content_size(), 2048);
+    }
 
     #[test]
     fn test_get_file_name() -> Result<(), Error> {

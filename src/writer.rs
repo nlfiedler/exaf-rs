@@ -135,6 +135,8 @@ pub struct Writer<W: Write + Seek> {
     encryption: Encryption,
     // secret key for encrypting files, if encryption is enabled
     secret_key: Option<Vec<u8>>,
+    // number of bytes committed to the output so far
+    bytes_written: u64,
 }
 
 impl<W: Write + Seek> Writer<W> {
@@ -163,6 +165,7 @@ impl<W: Write + Seek> Writer<W> {
             manifest: None,
             encryption: Encryption::None,
             secret_key: None,
+            bytes_written: 0,
         })
     }
 
@@ -222,6 +225,22 @@ impl<W: Write + Seek> Writer<W> {
             }
         }
         Ok(file_count)
+    }
+
+    ///
+    /// Return the number of bytes written to the output so far.
+    ///
+    /// This value is updated whenever a content block is written to the output,
+    /// and thus serves only as an approximation of the size of the data that
+    /// will eventually be flushed to the output. Thus, it may be off by as much
+    /// as the size of a content block depending on when this is called.
+    ///
+    /// A reasonable strategy would be to call this after each file or file
+    /// slice that is added, and when the value increases then that is likely
+    /// the most accurate value.
+    ///
+    pub fn bytes_written(&self) -> u64 {
+        self.bytes_written
     }
 
     ///
@@ -524,6 +543,7 @@ impl<W: Write + Seek> Writer<W> {
         let mut cursor = std::io::Cursor::new(&output);
         io::copy(&mut cursor, &mut self.output)?;
 
+        self.bytes_written += output.len() as u64;
         self.buffer = Some(content);
         self.manifest = Some(output);
         Ok(())
@@ -920,6 +940,7 @@ mod tests {
         let output = std::fs::File::create(&archive)?;
         let mut builder = super::writer::Writer::new(output)?;
         builder.add_file("test/fixtures/IMG_0385.JPG", None)?;
+        assert_eq!(builder.bytes_written(), 19541);
         builder.finish()?;
 
         // extract the archive and verify everything
@@ -945,6 +966,7 @@ mod tests {
             4096,
             8192,
         )?;
+        assert_eq!(builder.bytes_written(), 6413);
         builder.finish()?;
 
         // extract the archive and verify everything
