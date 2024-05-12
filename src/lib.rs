@@ -432,6 +432,7 @@ impl TryFrom<u8> for KeyDerivation {
 /// Parameters to be provided to the key derivation function. These are fairly
 /// common to most such functions.
 ///
+#[derive(Clone, Debug)]
 pub struct KeyDerivationParams {
     /// Number of iterations for key derivation function
     time_cost: u32,
@@ -500,6 +501,7 @@ impl Default for KeyDerivationParams {
 ///
 /// Represents a file, directory, or symbolic link within an archive.
 ///
+#[derive(Clone, Debug)]
 pub struct Entry {
     // name of the file, directory, or symbolic link
     name: String,
@@ -713,7 +715,7 @@ impl Entry {
 ///
 /// The type of an entry that has content, such as a file or symbolic link.
 ///
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
     /// Item represents a file an its entirety.
     File,
@@ -721,6 +723,13 @@ pub enum Kind {
     Link,
     /// Item represents a portion of a file at the given offset.
     Slice(u64),
+}
+
+impl Kind {
+    /// Return `true` if this kind represents a file slice.
+    pub fn is_slice(&self) -> bool {
+        matches!(*self, Kind::Slice(_))
+    }
 }
 
 // tags for archive header rows
@@ -783,14 +792,20 @@ pub mod writer;
 
 #[cfg(test)]
 mod tests {
-    use crate::writer::Options;
-
     use super::*;
+    use crate::writer::Options;
     use tempfile::tempdir;
 
     #[test]
     fn test_content_size() {
         assert_eq!(content_size(), 2048);
+    }
+
+    #[test]
+    fn test_kind_is_slide() {
+        assert_eq!(Kind::File.is_slice(), false);
+        assert_eq!(Kind::Link.is_slice(), false);
+        assert_eq!(Kind::Slice(0).is_slice(), true);
     }
 
     #[test]

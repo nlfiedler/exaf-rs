@@ -71,10 +71,14 @@ struct IncomingContent {
     size: u64,
 }
 
+///
+/// Set of options to be passed to the `Writer` as needed.
+///
+#[derive(Clone, Debug)]
 pub struct Options {
-    /// Save the file size to the archive as `LN` row.
+    /// Save the file size to the archive as `LN` row (default `false`).
     file_size: bool,
-    /// Save file metadata for files, links, and directories.
+    /// Save file metadata for files, links, and directories (default `false`).
     metadata: bool,
 }
 
@@ -520,6 +524,10 @@ impl<W: Write + Seek> Writer<W> {
                 if self.options.metadata {
                     add_metadata_rows(&file_entry, &mut header)?;
                 }
+            } else if content.kind.is_slice() {
+                // slices may have a non-zero item position but we always need
+                // to have the slice length written to the header
+                add_size_row(&file_entry, &mut header)?;
             }
             add_content_rows(&content, &mut header)?;
             header.write_header(&mut output)?;
@@ -958,7 +966,8 @@ mod tests {
         let outdir = tempdir()?;
         let archive = outdir.path().join("archive.exa");
         let output = std::fs::File::create(&archive)?;
-        let mut builder = super::writer::Writer::new(output)?;
+        let options = Options::new().file_size(true);
+        let mut builder = super::writer::Writer::with_options(output, options)?;
         builder.add_file_slice(
             "test/fixtures/IMG_0385.JPG",
             "5ba33678260abc495b6c77003ddab5cc613b9ba7",
@@ -966,8 +975,17 @@ mod tests {
             4096,
             8192,
         )?;
-        assert_eq!(builder.bytes_written(), 6413);
+        assert_eq!(builder.bytes_written(), 6431);
         builder.finish()?;
+
+        // verify the entry has the file (slice) size
+        let reader = super::reader::Entries::new(&archive)?;
+        let entries: Vec<u64> = reader
+            .filter_map(|e| e.ok())
+            .map(|e| e.size().unwrap_or(0))
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], 8192);
 
         // extract the archive and verify everything
         let mut reader = super::reader::from_file(&archive)?;

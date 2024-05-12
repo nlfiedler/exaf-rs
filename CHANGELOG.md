@@ -5,6 +5,12 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 This file follows the convention described at
 [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
+## [1.1.1] - 2024-05-11
+### Fixed
+- File slices were missing the `LN` header row if the file offset was non-zero.
+  In the case of file slices, they are treated as regular files.
+- Added `Clone` and `Debug` to public enums and structs.
+
 ## [1.1.0] - 2024-05-11
 ### Added
 - `content_size()` to return content block size limit.
