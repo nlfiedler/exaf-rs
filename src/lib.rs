@@ -816,6 +816,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(target_family = "unix")]
     #[test]
     fn test_write_link_read_link() -> Result<(), Error> {
         let outdir = tempdir()?;
@@ -974,6 +975,8 @@ mod tests {
 
     #[test]
     fn test_create_list_extract() -> Result<(), Error> {
+        // git does not track empty directories
+        std::fs::create_dir_all("test/fixtures/version1/tiny_tree/sub/empty-dir")?;
         // create the archive
         let outdir = tempdir()?;
         let archive = outdir.path().join("archive.exa");
@@ -991,6 +994,7 @@ mod tests {
             .collect();
         entries.sort();
         assert_eq!(entries.len(), 9);
+        #[cfg(target_family = "unix")]
         let expected: Vec<String> = vec![
             "tiny_tree".into(),
             "tiny_tree/file-a.txt".into(),
@@ -1002,6 +1006,18 @@ mod tests {
             "tiny_tree/sub/empty-file".into(),
             "tiny_tree/sub/file-1.txt".into(),
         ];
+        #[cfg(target_family = "windows")]
+        let expected: Vec<String> = vec![
+            "tiny_tree".into(),
+            "tiny_tree\\file-a.txt".into(),
+            "tiny_tree\\file-b.txt".into(),
+            "tiny_tree\\file-c.txt".into(),
+            "tiny_tree\\link-to-c".into(),
+            "tiny_tree\\sub".into(),
+            "tiny_tree\\sub\\empty-dir".into(),
+            "tiny_tree\\sub\\empty-file".into(),
+            "tiny_tree\\sub\\file-1.txt".into(),
+        ];
         for (a, b) in entries.iter().zip(expected.iter()) {
             assert_eq!(a, b);
         }
@@ -1012,10 +1028,14 @@ mod tests {
         reader.extract_all(outdir.path())?;
 
         // the symbolic link (has expected bytes)
-        let link = outdir.path().join("tiny_tree").join("link-to-c");
-        let link_bytes = read_link(&link)?;
-        let expected_link: Vec<u8> = "file-c.txt".as_bytes().to_vec();
-        assert_eq!(link_bytes, expected_link);
+        if cfg!(target_family = "unix") {
+            // links do not work properly on windows, there are several issues
+            // both in reading and writing symbolic links
+            let link = outdir.path().join("tiny_tree").join("link-to-c");
+            let link_bytes = read_link(&link)?;
+            let expected_link: Vec<u8> = "file-c.txt".as_bytes().to_vec();
+            assert_eq!(link_bytes, expected_link);
+        }
 
         // the empty directory (should exist)
         let empty_dir = outdir
@@ -1037,11 +1057,20 @@ mod tests {
 
         // the other files (have expected content)
         let actual = std::fs::read_to_string(outdir.path().join("tiny_tree").join("file-a.txt"))?;
+        #[cfg(target_family = "unix")]
         assert_eq!(actual, "mary had a little lamb\n");
+        #[cfg(target_family = "windows")]
+        assert_eq!(actual, "mary had a little lamb\r\n");
         let actual = std::fs::read_to_string(outdir.path().join("tiny_tree").join("file-b.txt"))?;
+        #[cfg(target_family = "unix")]
         assert_eq!(actual, "whose fleece was white as snow\n");
+        #[cfg(target_family = "windows")]
+        assert_eq!(actual, "whose fleece was white as snow\r\n");
         let actual = std::fs::read_to_string(outdir.path().join("tiny_tree").join("file-c.txt"))?;
+        #[cfg(target_family = "unix")]
         assert_eq!(actual, "and everywhere that Mary went\n");
+        #[cfg(target_family = "windows")]
+        assert_eq!(actual, "and everywhere that Mary went\r\n");
         let actual = std::fs::read_to_string(
             outdir
                 .path()
@@ -1049,12 +1078,17 @@ mod tests {
                 .join("sub")
                 .join("file-1.txt"),
         )?;
+        #[cfg(target_family = "unix")]
         assert_eq!(actual, "the lamb was sure to go.\n");
+        #[cfg(target_family = "windows")]
+        assert_eq!(actual, "the lamb was sure to go.\r\n");
         Ok(())
     }
 
     #[test]
     fn test_create_list_file_size() -> Result<(), Error> {
+        // git does not track empty directories
+        std::fs::create_dir_all("test/fixtures/version1/tiny_tree/sub/empty-dir")?;
         // create the archive
         let outdir = tempdir()?;
         let archive = outdir.path().join("archive.exa");
@@ -1073,6 +1107,7 @@ mod tests {
             .collect();
         entries.sort();
         assert_eq!(entries.len(), 9);
+        #[cfg(target_family = "unix")]
         let expected: Vec<(String, Option<u64>)> = vec![
             ("tiny_tree".into(), None),
             ("tiny_tree/file-a.txt".into(), Some(23 as u64)),
@@ -1083,6 +1118,18 @@ mod tests {
             ("tiny_tree/sub/empty-dir".into(), None),
             ("tiny_tree/sub/empty-file".into(), Some(0 as u64)),
             ("tiny_tree/sub/file-1.txt".into(), Some(25 as u64)),
+        ];
+        #[cfg(target_family = "windows")]
+        let expected: Vec<(String, Option<u64>)> = vec![
+            ("tiny_tree".into(), None),
+            ("tiny_tree\\file-a.txt".into(), Some(24 as u64)),
+            ("tiny_tree\\file-b.txt".into(), Some(32 as u64)),
+            ("tiny_tree\\file-c.txt".into(), Some(31 as u64)),
+            ("tiny_tree\\link-to-c".into(), Some(10 as u64)),
+            ("tiny_tree\\sub".into(), None),
+            ("tiny_tree\\sub\\empty-dir".into(), None),
+            ("tiny_tree\\sub\\empty-file".into(), Some(0 as u64)),
+            ("tiny_tree\\sub\\file-1.txt".into(), Some(26 as u64)),
         ];
         for (a, b) in entries.iter().zip(expected.iter()) {
             assert_eq!(a, b);
@@ -1116,6 +1163,8 @@ mod tests {
 
     #[test]
     fn test_create_list_extract_encryption() -> Result<(), Error> {
+        // git does not track empty directories
+        std::fs::create_dir_all("test/fixtures/version1/tiny_tree/sub/empty-dir")?;
         // create the archive
         let outdir = tempdir()?;
         let archive = outdir.path().join("archive.exa");
@@ -1139,6 +1188,7 @@ mod tests {
             .collect();
         entries.sort();
         assert_eq!(entries.len(), 9);
+        #[cfg(target_family = "unix")]
         let expected: Vec<String> = vec![
             "tiny_tree".into(),
             "tiny_tree/file-a.txt".into(),
@@ -1149,6 +1199,18 @@ mod tests {
             "tiny_tree/sub/empty-dir".into(),
             "tiny_tree/sub/empty-file".into(),
             "tiny_tree/sub/file-1.txt".into(),
+        ];
+        #[cfg(target_family = "windows")]
+        let expected: Vec<String> = vec![
+            "tiny_tree".into(),
+            "tiny_tree\\file-a.txt".into(),
+            "tiny_tree\\file-b.txt".into(),
+            "tiny_tree\\file-c.txt".into(),
+            "tiny_tree\\link-to-c".into(),
+            "tiny_tree\\sub".into(),
+            "tiny_tree\\sub\\empty-dir".into(),
+            "tiny_tree\\sub\\empty-file".into(),
+            "tiny_tree\\sub\\file-1.txt".into(),
         ];
         for (a, b) in entries.iter().zip(expected.iter()) {
             assert_eq!(a, b);
@@ -1161,10 +1223,14 @@ mod tests {
         reader.extract_all(outdir.path())?;
 
         // the symbolic link (has expected bytes)
-        let link = outdir.path().join("tiny_tree").join("link-to-c");
-        let link_bytes = read_link(&link)?;
-        let expected_link: Vec<u8> = "file-c.txt".as_bytes().to_vec();
-        assert_eq!(link_bytes, expected_link);
+        if cfg!(target_family = "unix") {
+            // links do not work properly on windows, there are several issues
+            // both in reading and writing symbolic links
+            let link = outdir.path().join("tiny_tree").join("link-to-c");
+            let link_bytes = read_link(&link)?;
+            let expected_link: Vec<u8> = "file-c.txt".as_bytes().to_vec();
+            assert_eq!(link_bytes, expected_link);
+        }
 
         // the empty directory (should exist)
         let empty_dir = outdir
@@ -1186,11 +1252,20 @@ mod tests {
 
         // the other files (have expected content)
         let actual = std::fs::read_to_string(outdir.path().join("tiny_tree").join("file-a.txt"))?;
+        #[cfg(target_family = "unix")]
         assert_eq!(actual, "mary had a little lamb\n");
+        #[cfg(target_family = "windows")]
+        assert_eq!(actual, "mary had a little lamb\r\n");
         let actual = std::fs::read_to_string(outdir.path().join("tiny_tree").join("file-b.txt"))?;
+        #[cfg(target_family = "unix")]
         assert_eq!(actual, "whose fleece was white as snow\n");
+        #[cfg(target_family = "windows")]
+        assert_eq!(actual, "whose fleece was white as snow\r\n");
         let actual = std::fs::read_to_string(outdir.path().join("tiny_tree").join("file-c.txt"))?;
+        #[cfg(target_family = "unix")]
         assert_eq!(actual, "and everywhere that Mary went\n");
+        #[cfg(target_family = "windows")]
+        assert_eq!(actual, "and everywhere that Mary went\r\n");
         let actual = std::fs::read_to_string(
             outdir
                 .path()
@@ -1198,7 +1273,10 @@ mod tests {
                 .join("sub")
                 .join("file-1.txt"),
         )?;
+        #[cfg(target_family = "unix")]
         assert_eq!(actual, "the lamb was sure to go.\n");
+        #[cfg(target_family = "windows")]
+        assert_eq!(actual, "the lamb was sure to go.\r\n");
         Ok(())
     }
 }
