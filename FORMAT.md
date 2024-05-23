@@ -20,7 +20,7 @@ There is nothing at all novel about the format described here, as it borrows hea
 * [Pack](https://pack.ac): the manner in which it packs files into a content blob.
 * [tar](https://en.wikipedia.org/wiki/Tar_(computing)): how it can easily append new content at the end of an existing file.
 * [XAR](https://en.wikipedia.org/wiki/Xar_(archiver)): the basic overall structure and flexible metadata format.
-* [ZIP](https://en.wikipedia.org/wiki/ZIP_(file_format)): the tag/size/value _extra fields_ which are described herein as _header rows_.
+* [ZIP](https://en.wikipedia.org/wiki/ZIP_(file_format)): the tag/size/value _extra fields_ which are described herein as _header rows_. This basic structure is also known as [Type-length-value](https://en.wikipedia.org/wiki/Type–length–value).
 
 ### Objectives
 
