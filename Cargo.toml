@@ -8,7 +8,10 @@ repository = "https://github.com/nlfiedler/exaf-rs"
 readme = "README.md"
 keywords = ["archiver", "compressor"]
 license = "MIT"
-default-run = "exaf-rs"
+
+[[bin]]
+name = "exaf"
+path = "src/main.rs"
 
 [dependencies]
 aes-gcm = "0.10.3"
