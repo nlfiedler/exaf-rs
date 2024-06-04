@@ -33,13 +33,15 @@ The high-level objectives are as follows:
 * It should support encryption using the best available algorithms and standards.
 * It should have as few limits as is reasonable (see [Limitations](#limitations) below).
 
+### Considerations
+
 Concerning the potential choices for the format of metadata within the archive, several formats come to mind. Looking at something like [XAR](https://en.wikipedia.org/wiki/Xar_(archiver)), it is clear that XML is flexible, humanly readable, and supports complex data types. Alternatively, JSON is smaller than XML and almost as expressive. Even more concise is something like the EXIF format that uses _tag_, _type_, and _count_ to record all sorts of values. A binary format that is very concise, [CBOR](https://cbor.io), is also a strong contender.
 
-At a higher level, the overall container format found in Pack is very interesting. It places a hard dependency on a third party (SQLite), and involves some very complex SQL queries, but it is fast and produces a pretty small archive. As we will soon see with CBOR, relying on SQLite means you **must** have access to a good library that provides everything you need from SQLite, and that can be a challenge.
+At a higher level, the overall container format found in Pack is very interesting. It places a hard dependency on a specific third party library (SQLite), and involves some very complex SQL queries, but it is fast and produces a pretty small archive. As we will soon see with CBOR, relying on SQLite means you **must** have access to a good library that provides everything you need from SQLite, and that can be a challenge.
 
-Ultimately, the format of metadata described below most closely resembles that of the _extra fields_ found in the [ZIP file format](https://en.wikipedia.org/wiki/ZIP_(file_format)). Why not XML? It's not compact, not even close. Why not JSON? It is smaller than XML but still not very compact. Why not CBOR? It is difficult to find a compliant implementation (in Rust), especially with respect to storing a byte array (referred to as a _byte string_ in the CBOR specification).
+The format of the metadata for EXAF will be [Type-length-value](https://en.wikipedia.org/wiki/Type–length–value), using the labels _tag_, _size_, and _value_ because EXAF took inspiration from EXIF. Why not use XML? It's not at all compact. What about JSON? It is smaller than XML but still not very compact. Why not CBOR? It is difficult to find an easy-to-use and compliant implementation (in Rust), especially with respect to storing a byte array (referred to as a _byte string_ in the CBOR specification).
 
-### Headers
+## Headers
 
 Nearly all metadata is represented with a _header_ that consists of rows of **tag**, **size**, and **value**. A header starts with 2 bytes that indicate the number of rows. Each row has a 2-byte tag, a 2-byte size, and an N-byte value, where N may any integer from 0 to 65,535. An empty header is represented as two zero bytes, meaning there are zero rows in the header. A textual value **must** be UTF-8 encoded. An integer value _should_ be serialized to the smallest number of bytes. Tags and sizes will **always** be two bytes each, so the shortest possible row will be 4 bytes in length (2 + 2 + 0). Likewise, the longest possible row will be 2 + 2 + 65,535 bytes. Tags, sizes, and numeric values are stored in network byte order (Big Endian).
 
