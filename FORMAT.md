@@ -2,7 +2,7 @@
 
 ## Overview
 
-The basic file structure starts with a header that describes the file, followed by a table-of-contents (hereafter called _manifest_), followed by the (compressed) file data (_content_). The manifest describes the directories, files, and symbolic links that are recorded in the content. The file and link entries have additional fields that indicate where their content is stored within the content block. At a minimum there will be a header followed by one manifest and content block, but it is possible to have multiple manifest/content pairs, one following immediately after the other.
+The basic file structure starts with a header that describes the file, followed by a table-of-contents (hereafter called _manifest_), followed by the, usually compressed, file data (_content_). The manifest describes the directories, files, and symbolic links that are recorded in the content. The file and link entries have additional fields that indicate where their content is stored within the content block. At a minimum there will be a header followed by one manifest and content block, but it is possible to have multiple manifest/content pairs, one following immediately after the other.
 
 | Section | Description |
 | ------- | ----------- |
@@ -307,7 +307,7 @@ The `SA` value length may vary but it will likely be around 16 bytes. The salt i
 
 The three optional _cost_ rows are given as parameters to the key-derivation function. The `TC` value indicates the number of iterations, the `MC` value indicates the number of 1 kilobyte memory blocks to be used, and the `PC` value indicates the degree of parallelism. The **default** value for `TC` is `2`, the **default** for `MC` is `19,456`, and the **default** for `PC` is `1`. These defaults are recommended in OWASP's [password storage cheat sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html) and are the defaults in the [argon2](https://docs.rs/argon2/latest/argon2/) Rust crate.
 
-The `TL` row is a value that may be referred to as either the _output length_ or _tag length_, which indicates the number of bytes of desired output from the key derivation function. The **default** in the Argon2 Rust create is `32` and as such is the default for this format. In fact, for AES-256 encryption you **need** a key of 32 bytes.
+The `TL` row is a value that may be referred to as either the _output length_ or _tag length_, which indicates the number of bytes of desired output from the key derivation function. The **default** in the Argon2 Rust crate is `32` and as such is the default for this format. In fact, for AES-256 encryption you _need_ a key of 32 bytes.
 
 The basic flow of encryption works like so:
 
@@ -346,7 +346,7 @@ From the details above, we can infer several limits on the archive format:
 * The number of rows in a header is encoded as 16-bits, so a header can have at most 65,535 rows.
 * Header row sizes are encoded as 16-bits, so a row value can have at most 65,535 bytes.
 * Algorithms are all encoded as 8-bits, limiting us to 255 compression algorithms, 255 encryption algorithms, and 255 key derivation functions.
-* File _item position_ (`IP`) values are encoding using 64-bits, limiting file sizes to around 18,446,744,073,709,551,615 bytes.
+* File _item position_ (`IP`) values are encoded using 64-bits, limiting file sizes to around 18,446,744,073,709,551,615 bytes.
 * The number of iterations for the KDF is encoded using 32-bits, limiting us to 4,294,967,295 iterations.
 * Directory identifiers are encoded using 32-bits, so at most 4,294,967,295 directories can appear in a single archive.
 
