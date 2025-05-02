@@ -57,6 +57,9 @@
 //! }
 //! ```
 //!
+//! A more complete example of creating and extracting archives can be found in
+//! the `src/main.rs` file in the source repository.
+//!
 
 use chrono::prelude::*;
 use std::fmt;
