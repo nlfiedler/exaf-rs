@@ -5,6 +5,10 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 This file follows the convention described at
 [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
+## [1.2.0] - 2025-05-01
+### Changed
+- Updated `rand_core` and `thiserror` dependencies to latest release.
+
 ## [1.1.1] - 2024-05-11
 ### Fixed
 - File slices were missing the `LN` header row if the file offset was non-zero.
