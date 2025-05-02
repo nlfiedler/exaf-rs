@@ -20,8 +20,8 @@ clap = "4.5.4"
 chrono = "0.4.37"
 libc = "0.2.153"
 os_str_bytes = { version = "7.0.0", features = ["conversions"] }
-rand_core = { version = "0.6.4", features = ["getrandom"] }
-thiserror = "1.0.58"
+rand_core = { version = "0.9.3", features = ["os_rng"] }
+thiserror = "2.0.12"
 zstd = "0.13.1"
 
 [dev-dependencies]
