@@ -10,7 +10,7 @@ In short, the file consists of a short header which may include encryption detai
 
 ## Objectives
 
-First and foremost, the purpose of this project is to satisfy my own needs, and this reference implementation is written in [Rust](https://www.rust-lang.org) so that I can use it within my own Rust-based applications. If it happens to be useful to others, fantastic, and I would be more than happy to continue developing the format and/or this crate toward that end.
+First and foremost, the purpose of this project is to satisfy my own needs, and this reference implementation is written in [Rust](https://www.rust-lang.org) so that I can use it within my own Rust-based applications. In particular, the [zorigami](https://github.com/nlfiedler/zorigami) project needed a good "pack" file format, and each of the approaches that had been tried had their drawbacks. Ideally the format would be simple, extensible, flexible, use modern compression algorithms, encrypt as much of the data as possible using the best algorithms available, and be easy to use from within any program. This project is the result of that effort. If this happens to be useful to others, fantastic, I would be more than happy to continue developing the format and/or this crate.
 
 ## Build and Run
 

@@ -20,7 +20,7 @@ There is nothing at all novel about the format described here, as it borrows hea
 * [Pack](https://pack.ac): the manner in which it packs files into a content blob.
 * [tar](https://en.wikipedia.org/wiki/Tar_(computing)): how it can easily append new content at the end of an existing file.
 * [XAR](https://en.wikipedia.org/wiki/Xar_(archiver)): the basic overall structure and flexible metadata format.
-* [ZIP](https://en.wikipedia.org/wiki/ZIP_(file_format)): the tag/size/value _extra fields_ which are described herein as _header rows_. This basic structure is also known as [Type-length-value](https://en.wikipedia.org/wiki/Type–length–value).
+* [ZIP](https://en.wikipedia.org/wiki/ZIP_(file_format)): the tag/size/data _extra fields_ which are described herein as _header rows_. This structure is more commonly known as [Type-length-value](https://en.wikipedia.org/wiki/Type–length–value).
 
 ### Objectives
 
@@ -28,18 +28,26 @@ The high-level objectives are as follows:
 
 * It should be flexible, extensible, and support fields of various lengths.
 * It should be easy to add content by simply appending to the end of the file.
-* It should support recording metadata for files and directories.
+* It should support recording metadata for files, directories, and symbolic links.
 * It should support the best available compression algorithms.
-* It should support encryption using the best available algorithms and standards.
+* It should support encryption of all data using the best available standards-based algorithms.
 * It should have as few limits as is reasonable (see [Limitations](#limitations) below).
 
 ### Considerations
 
-Concerning the potential choices for the format of metadata within the archive, several formats come to mind. Looking at something like [XAR](https://en.wikipedia.org/wiki/Xar_(archiver)), it is clear that XML is flexible, humanly readable, and supports complex data types. Alternatively, JSON is smaller than XML and almost as expressive. Even more concise is something like the EXIF format that uses _tag_, _type_, and _count_ to record all sorts of values. A binary format that is very concise, [CBOR](https://cbor.io), is also a strong contender.
+At a high level, the overall container format found in Pack is very interesting. It places a hard dependency on a specific third party library (SQLite), and involves some very complex SQL queries, but it is fast and produces a small archive. However, relying on SQLite means you **must** have access to a good library in your preferred programming language that exposes every feature you need from SQLite to achieve good performance, and that can be a challenge.
 
-At a higher level, the overall container format found in Pack is very interesting. It places a hard dependency on a specific third party library (SQLite), and involves some very complex SQL queries, but it is fast and produces a pretty small archive. As we will soon see with CBOR, relying on SQLite means you **must** have access to a good library that provides everything you need from SQLite, and that can be a challenge.
+When considering how to record metadata _without_ a container such as SQLite, there are a few data formats that are in wide use already. For instance, [XAR](https://en.wikipedia.org/wiki/Xar_(archiver)) uses XML which is flexible, humanly readable, and supports complex data types. An obvious alternative to XML is JSON, which is more compact and almost as expressive. In contrast, a binary format like EXIF uses _tag_, _type_, and _count_ to record all sorts of values very compactly, albeit sacrificing human readability. Another compact binary format is [CBOR](https://cbor.io), which is an Internet Standard and has wide language support. However, as observed with SQLite, finding a library for CBOR that is compliant with the standard can be difficult (_byte string_ support, for instance, is lacking in the one easy-to-use Rust crate that is still maintained).
 
-The format of the metadata for EXAF will be [Type-length-value](https://en.wikipedia.org/wiki/Type–length–value), using the labels _tag_, _size_, and _value_ because EXAF took inspiration from EXIF. Why not use XML? It's not at all compact. What about JSON? It is smaller than XML but still not very compact. Why not CBOR? It is difficult to find an easy-to-use and compliant implementation (in Rust), especially with respect to storing a byte array (referred to as a _byte string_ in the CBOR specification).
+In looking at both the overall file structure and the format of the metadata, the same problem was encountered: relying on a third party library is risky. Either the library does not support the necessary features, or the libraries available in your programming language are no longer maintained. For this reason, the overall file structure will be as described in the [Overview](#overview), and the metadata format will be [Type-length-value](https://en.wikipedia.org/wiki/Type–length–value), which is easy to implement, flexible, extensible, and adequately compact.
+
+## Terminology
+
+Rather than using the terms _type_, _length_, and _value_ to label the fields within the rows of the metadata, this document will instead use the terms **tag**, **size**, and **value**. Both EXIF and Zip use the term _tag_ instead of _type_ for the field in the data row that describes what the value represents, and _tag_ is a less overloaded term than _type_. As for the term _size_, it was encountered early in the research phase (both Zip and Pack use this term) and has become ingrained into this document.
+
+A **manifest** is a collection of **headers** that describe the files, directories, and symbolic links stored within the archive.
+
+A **header** is a collection of data rows represented as _tag_/_size_/_value_ tuples. A header is like a table of rows of data, except that each row can have different types of values, and therefore different lengths, so using the term _table_ would be misleading.
 
 ## Headers
 
@@ -47,7 +55,7 @@ Nearly all metadata is represented with a _header_ that consists of rows of **ta
 
 The order of rows in the header is **not** significant. A header should be treated as a dictionary of keys and values.
 
-Why does _every_ row have a 2-byte tag and 2-byte size? Because different implementations are free to write out tags that are understood by that implementation, but not necessarily other implementations. As such, a reader might be given a file that contains unrecognized tags, and as such _should_ ignore anything it does not understand. With this basic structure in place, any reader can parse the bytes into a simple map of **tags** to **values** (in which the values are simply raw bytes), processing those tags the reader knows about and ignoring the rest.
+The purpose of _every_ row having a 2-byte tag and 2-byte size is to allow different implementations to be free to write out tags that are understood by that implementation, but not necessarily other implementations. As such, a reader might be given a file that contains unrecognized tags, and as such _should_ ignore anything it does not understand. With this basic structure in place, any reader can parse the bytes into a simple map of **tags** to **values** (in which the values are simply raw bytes), processing those tags the reader knows about and ignoring the rest.
 
 A simple example follows, which contains 2 rows, one textual value and one numeric value. Offsets 0 and 1 indicate the number of rows, while row 1 starts at offset 2 and ends at offset 14, and row 2 starts at offset 15 and ends at offset 19. This header describes a file whose name is `README.md` and it belongs in a directory whose unique identifier is `101`.
 
@@ -133,7 +141,7 @@ The number of directory, file, and symlink entries in the manifest is indicated 
 
 There may be more than one of these manifest/content pairs existing in the archive. The only indication is when the reader reaches the end of the file. This allows for easy appending of new manifest/content pairs without modifying the existing archive data.
 
-When creating multiple manifest/content pairs, only the file entries that appear in that content need to be listed in the associated manifest. Similarly, parent directories that have already been recorded in a previous manifest do not need to be repeated in subsequent manifests. If a file is split across two or more content blocks, then its entry will appear in each associated manifest. Why? Because each entry will indicate which part of the file is stored in the associated content, and where within the content (as described below). It is sufficient to store the metadata only in the first manifest, rather than repeat that lengthy set of rows each time. The metadata only needs to be applied when the file is first created, and that will happen when the first content block containing a piece of that file is processed.
+When creating multiple manifest/content pairs, only the file entries that appear in that content need to be listed in the associated manifest. Similarly, parent directories that have already been recorded in a previous manifest do not need to be repeated in subsequent manifests. If a file is split across two or more content blocks, then its entry will appear in each associated manifest, since each entry will indicate which part of the file is stored in the associated content, and where within the content (as described below). It is sufficient to store the metadata only in the first manifest, rather than repeat that lengthy set of rows each time. The metadata only needs to be applied when the file is first created, and that will happen when the first content block containing a piece of that file is processed.
 
 ### Header
 
@@ -142,7 +150,7 @@ Each manifest starts with a small header that describes the rest of the manifest
 | Tag  | Description                        | Max Size | Type  |
 | ---- | ---------------------------------- | -------- | ----- |
 | `NE` | number of entries in this manifest |        4 | `u32` |
-| `CA` | compression algorithm (e.g. zstd)  |        1 | `u8`  |
+| `CA` | compression algorithm              |        1 | `u8`  |
 | `BS` | size of content in bytes           |        4 | `u32` |
 
 The values for `CA` at this time are `0` for _none_ and `1` for [Zstandard](http://facebook.github.io/zstd/). Zstandard makes for a good choice for the initial version since it is both fast and produces fairly small compressed content. When creating an archive, rather than have a `CA` row whose value is `0` it is better to simply elide that row entirely as _none_ will be the default.
@@ -341,7 +349,7 @@ As alluded to above, the `ES` value will typically be smaller than 16mb due to c
 
 ## Limitations
 
-From the details above, we can infer several limits on the archive format:
+From the details above, several limits on the archive format can be inferred:
 
 * The number of rows in a header is encoded as 16-bits, so a header can have at most 65,535 rows.
 * Header row sizes are encoded as 16-bits, so a row value can have at most 65,535 bytes.
