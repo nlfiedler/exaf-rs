@@ -45,9 +45,9 @@ In looking at both the overall file structure and the format of the metadata, th
 
 Rather than using the terms _type_, _length_, and _value_ to label the fields within the rows of the metadata, this document will instead use the terms **tag**, **size**, and **value**. Both EXIF and Zip use the term _tag_ instead of _type_ for the field in the data row that describes what the value represents, and _tag_ is a less overloaded term than _type_. As for the term _size_, it was encountered early in the research phase (both Zip and Pack use this term) and has become ingrained into this document.
 
-A **manifest** is a collection of **headers** that describe the files, directories, and symbolic links stored within the archive.
-
 A **header** is a collection of data rows represented as _tag_/_size_/_value_ tuples. A header is like a table of rows of data, except that each row can have different types of values, and therefore different lengths, so using the term _table_ would be misleading.
+
+A **manifest** is a collection of **headers** that describe the files, directories, and symbolic links stored within the archive.
 
 ## Headers
 
