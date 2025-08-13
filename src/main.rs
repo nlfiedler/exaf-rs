@@ -1,7 +1,7 @@
 //
 // Copyright (c) 2024 Nathan Fiedler
 //
-use clap::{arg, Command};
+use clap::{Command, arg};
 use exaf_rs::{writer::*, *};
 use std::fs::File;
 use std::path::{Path, PathBuf};

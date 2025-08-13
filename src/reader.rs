@@ -694,7 +694,7 @@ impl Reader {
                         }
                     }
                     _ => Err(Error::from(err)),
-                }
+                };
             }
         }
     }

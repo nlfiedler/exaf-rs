@@ -222,7 +222,7 @@ fn sanitize_path<P: AsRef<Path>>(dirty: P) -> Result<PathBuf, Error> {
 ///
 fn generate_salt(kd: &KeyDerivation) -> Result<Vec<u8>, Error> {
     if *kd == KeyDerivation::Argon2id {
-        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::password_hash::{SaltString, rand_core::OsRng};
         let salt = SaltString::generate(&mut OsRng);
         let mut buf: Vec<u8> = vec![0; salt.len()];
         let bytes = salt
@@ -271,8 +271,8 @@ fn derive_key(
 fn encrypt_data(ea: &Encryption, key: &[u8], data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
     if *ea == Encryption::AES256GCM {
         use aes_gcm::{
-            aead::{Aead, AeadCore, KeyInit, OsRng},
             Aes256Gcm, Key,
+            aead::{Aead, AeadCore, KeyInit, OsRng},
         };
         let key: &Key<Aes256Gcm> = key.into();
         let cipher = Aes256Gcm::new(&key);
@@ -294,8 +294,8 @@ fn encrypt_data(ea: &Encryption, key: &[u8], data: &[u8]) -> Result<(Vec<u8>, Ve
 fn decrypt_data(ea: &Encryption, key: &[u8], data: &[u8], nonce: &[u8]) -> Result<Vec<u8>, Error> {
     if *ea == Encryption::AES256GCM {
         use aes_gcm::{
-            aead::{generic_array::GenericArray, Aead, AeadCore, KeyInit},
             Aes256Gcm, Key,
+            aead::{Aead, AeadCore, KeyInit, generic_array::GenericArray},
         };
         let key: &Key<Aes256Gcm> = key.into();
         let cipher = Aes256Gcm::new(&key);
@@ -935,7 +935,7 @@ mod tests {
 
     #[test]
     fn test_generate_salt() -> Result<(), Error> {
-        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::password_hash::{SaltString, rand_core::OsRng};
         let salt = SaltString::generate(&mut OsRng);
         let mut buf: Vec<u8> = vec![0; salt.len()];
         let result = salt.decode_b64(&mut buf);
