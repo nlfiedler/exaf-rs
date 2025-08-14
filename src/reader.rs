@@ -179,7 +179,7 @@ fn get_header_u8(rows: &HeaderMap, key: &u16) -> Result<Option<u8>, Error> {
 }
 
 #[allow(dead_code)]
-fn pad_to_u16(row: &Vec<u8>) -> [u8; 2] {
+fn pad_to_u16(row: &[u8]) -> [u8; 2] {
     if row.len() == 1 {
         [0, row[0]]
     } else {
@@ -198,7 +198,7 @@ fn get_header_u16(rows: &HeaderMap, key: &u16) -> Result<Option<u16>, Error> {
     }
 }
 
-fn pad_to_u32(row: &Vec<u8>) -> [u8; 4] {
+fn pad_to_u32(row: &[u8]) -> [u8; 4] {
     if row.len() == 1 {
         [0, 0, 0, row[0]]
     } else if row.len() == 2 {
@@ -218,7 +218,7 @@ fn get_header_u32(rows: &HeaderMap, key: &u16) -> Result<Option<u32>, Error> {
     }
 }
 
-fn pad_to_u64(row: &Vec<u8>) -> [u8; 8] {
+fn pad_to_u64(row: &[u8]) -> [u8; 8] {
     if row.len() == 1 {
         [0, 0, 0, 0, 0, 0, 0, row[0]]
     } else if row.len() == 2 {
@@ -291,9 +291,9 @@ impl TryFrom<HeaderMap> for ArchiveHeader {
 
     fn try_from(value: HeaderMap) -> Result<Self, Self::Error> {
         let enc_algo = get_header_u8(&value, &TAG_ENC_ALGO)?
-            .map_or(Ok(Encryption::None), |v| Encryption::try_from(v))?;
+            .map_or(Ok(Encryption::None), Encryption::try_from)?;
         let key_algo = get_header_u8(&value, &TAG_KEY_DERIV)?
-            .map_or(Ok(KeyDerivation::None), |v| KeyDerivation::try_from(v))?;
+            .map_or(Ok(KeyDerivation::None), KeyDerivation::try_from)?;
         let salt = get_header_bytes(&value, &TAG_SALT)?;
         let time_cost = get_header_u32(&value, &TAG_TIME_COST)?;
         let mem_cost = get_header_u32(&value, &TAG_MEM_COST)?;
@@ -574,7 +574,7 @@ impl Reader {
                         // the only remaining option is copy (keep the larger buffer
                         // to optimize memory management)
                         if buffer.len() > content.len() {
-                            buffer.extend(content.drain(..));
+                            buffer.append(&mut content);
                         } else {
                             buffer = content;
                         }
@@ -588,8 +588,8 @@ impl Reader {
                         if entry.kind == Kind::File {
                             // make sure the file exists and is writable
                             let mut output = fs::OpenOptions::new()
-                                .write(true)
                                 .create(true)
+                                .append(true)
                                 .open(&fpath)?;
                             let file_len = fs::metadata(fpath)?.len();
                             if file_len == 0 {
@@ -668,11 +668,11 @@ impl Reader {
                         cursor.read_to_end(&mut buffer)?;
                         self.content = Some(std::io::Cursor::new(buffer));
                         self.block_size = None;
-                        return Ok(Some(manifest));
+                        Ok(Some(manifest))
                     } else {
-                        return Err(Error::InternalError(
+                        Err(Error::InternalError(
                             "encrypted archive, call enable_encryption()".into(),
-                        ));
+                        ))
                     }
                 } else {
                     let manifest = Manifest::try_from(rows)?;
@@ -680,22 +680,20 @@ impl Reader {
                     // block size so that we know how to read the content
                     self.block_size = Some(manifest.block_size);
                     self.content = None;
-                    return Ok(Some(manifest));
+                    Ok(Some(manifest))
                 }
             }
-            Err(err) => {
-                return match err {
-                    Error::UnexpectedEof => Ok(None),
-                    Error::IOError(ioerr) => {
-                        if ioerr.kind() == ErrorKind::UnexpectedEof {
-                            Ok(None)
-                        } else {
-                            Err(Error::from(ioerr))
-                        }
+            Err(err) => match err {
+                Error::UnexpectedEof => Ok(None),
+                Error::IOError(ioerr) => {
+                    if ioerr.kind() == ErrorKind::UnexpectedEof {
+                        Ok(None)
+                    } else {
+                        Err(Error::from(ioerr))
                     }
-                    _ => Err(Error::from(err)),
-                };
-            }
+                }
+                _ => Err(err),
+            },
         }
     }
 
@@ -840,7 +838,7 @@ impl Iterator for Entries {
     fn next(&mut self) -> Option<Self::Item> {
         match self.get_next_entry() {
             Ok(None) => None,
-            Ok(some) => some.map(|e| Ok(e)),
+            Ok(some) => some.map(Ok),
             Err(err) => Some(Err(err)),
         }
     }

@@ -74,7 +74,7 @@ struct IncomingContent {
 ///
 /// Set of options to be passed to the `Writer` as needed.
 ///
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Options {
     /// Save the file size to the archive as `LN` row (default `false`).
     file_size: bool,
@@ -98,15 +98,6 @@ impl Options {
     pub fn metadata(mut self, value: bool) -> Self {
         self.metadata = value;
         self
-    }
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            file_size: false,
-            metadata: false,
-        }
     }
 }
 
@@ -498,9 +489,9 @@ impl<W: Write + Seek> Writer<W> {
         // write all of the directory entries to the output
         for dir_entry in self.directories.iter() {
             let mut header = HeaderBuilder::new();
-            add_directory_rows(&dir_entry, &mut header)?;
+            add_directory_rows(dir_entry, &mut header)?;
             if self.options.metadata {
-                add_metadata_rows(&dir_entry, &mut header)?;
+                add_metadata_rows(dir_entry, &mut header)?;
             }
             header.write_header(&mut output)?;
         }
@@ -513,28 +504,28 @@ impl<W: Write + Seek> Writer<W> {
                 .get(&content.file_id)
                 .expect("internal error, missing file entry for item content");
             let mut header = HeaderBuilder::new();
-            add_file_rows(&file_entry, &mut header)?;
+            add_file_rows(file_entry, &mut header)?;
             if content.itempos == 0 {
                 // optionally write the file size and metadata to the header,
                 // but only if this is the first time this entry is being
                 // written to a manifest (i.e. do not repeat later)
                 if self.options.file_size {
-                    add_size_row(&file_entry, &mut header)?;
+                    add_size_row(file_entry, &mut header)?;
                 }
                 if self.options.metadata {
-                    add_metadata_rows(&file_entry, &mut header)?;
+                    add_metadata_rows(file_entry, &mut header)?;
                 }
             } else if content.kind.is_slice() {
                 // slices may have a non-zero item position but we always need
                 // to have the slice length written to the header
-                add_size_row(&file_entry, &mut header)?;
+                add_size_row(file_entry, &mut header)?;
             }
-            add_content_rows(&content, &mut header)?;
+            add_content_rows(content, &mut header)?;
             header.write_header(&mut output)?;
         }
 
         // write the compressed buffer to the output
-        output.write_all(&mut content)?;
+        output.write_all(&content)?;
 
         // if encryption is enabled, write an additional header and then the
         // encrypted block of manifest + content; the result of this will likely

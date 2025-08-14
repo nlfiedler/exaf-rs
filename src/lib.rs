@@ -148,8 +148,8 @@ fn read_link(path: &Path) -> Result<Vec<u8>, Error> {
 fn write_link(contents: &[u8], filepath: &Path) -> Result<(), Error> {
     use os_str_bytes::OsStringBytes;
     // this may panic if the bytes are not valid for this platform
-    let target = std::ffi::OsString::from_io_vec(contents.to_owned())
-        .ok_or_else(|| Error::LinkTextEncoding)?;
+    let target =
+        std::ffi::OsString::from_io_vec(contents.to_owned()).ok_or(Error::LinkTextEncoding)?;
     // cfg! macro will not work in this OS-specific import case
     {
         #[cfg(target_family = "unix")]
@@ -161,7 +161,7 @@ fn write_link(contents: &[u8], filepath: &Path) -> Result<(), Error> {
         #[cfg(target_family = "windows")]
         fs::symlink_file(target, filepath)?;
     }
-    return Ok(());
+    Ok(())
 }
 
 ///
@@ -255,7 +255,7 @@ fn derive_key(
         let kdf = builder
             .context(Algorithm::Argon2id, Version::V0x13)
             .map_err(|e| Error::InternalError(format!("argon2 failed: {}", e)))?;
-        kdf.hash_password_into(password.as_bytes(), salt, &mut output.as_mut_slice())
+        kdf.hash_password_into(password.as_bytes(), salt, output.as_mut_slice())
             .map_err(|e| Error::InternalError(format!("argon2 failed: {}", e)))?;
         Ok(output)
     } else {
@@ -275,7 +275,7 @@ fn encrypt_data(ea: &Encryption, key: &[u8], data: &[u8]) -> Result<(Vec<u8>, Ve
             aead::{Aead, AeadCore, KeyInit, OsRng},
         };
         let key: &Key<Aes256Gcm> = key.into();
-        let cipher = Aes256Gcm::new(&key);
+        let cipher = Aes256Gcm::new(key);
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
         let ciphertext = cipher
             .encrypt(&nonce, data)
@@ -298,10 +298,10 @@ fn decrypt_data(ea: &Encryption, key: &[u8], data: &[u8], nonce: &[u8]) -> Resul
             aead::{Aead, AeadCore, KeyInit, generic_array::GenericArray},
         };
         let key: &Key<Aes256Gcm> = key.into();
-        let cipher = Aes256Gcm::new(&key);
+        let cipher = Aes256Gcm::new(key);
         let nonce: &GenericArray<u8, <Aes256Gcm as AeadCore>::NonceSize> = nonce.into();
         let plaintext = cipher
-            .decrypt(&nonce, data)
+            .decrypt(nonce, data)
             .map_err(|e| Error::InternalError(format!("aes_gcm failed: {}", e)))?;
         Ok(plaintext)
     } else {
@@ -328,9 +328,9 @@ impl fmt::Display for Compression {
     }
 }
 
-impl Into<u8> for Compression {
-    fn into(self) -> u8 {
-        match self {
+impl From<Compression> for u8 {
+    fn from(val: Compression) -> Self {
+        match val {
             Compression::None => 0,
             Compression::ZStandard => 1,
         }
@@ -369,9 +369,9 @@ impl fmt::Display for Encryption {
     }
 }
 
-impl Into<u8> for Encryption {
-    fn into(self) -> u8 {
-        match self {
+impl From<Encryption> for u8 {
+    fn from(val: Encryption) -> Self {
+        match val {
             Encryption::None => 0,
             Encryption::AES256GCM => 1,
         }
@@ -410,9 +410,9 @@ impl fmt::Display for KeyDerivation {
     }
 }
 
-impl Into<u8> for KeyDerivation {
-    fn into(self) -> u8 {
-        match self {
+impl From<KeyDerivation> for u8 {
+    fn from(val: KeyDerivation) -> Self {
+        match val {
             KeyDerivation::None => 0,
             KeyDerivation::Argon2id => 1,
         }
@@ -806,9 +806,9 @@ mod tests {
 
     #[test]
     fn test_kind_is_slide() {
-        assert_eq!(Kind::File.is_slice(), false);
-        assert_eq!(Kind::Link.is_slice(), false);
-        assert_eq!(Kind::Slice(0).is_slice(), true);
+        assert!(!Kind::File.is_slice());
+        assert!(!Kind::Link.is_slice());
+        assert!(Kind::Slice(0).is_slice());
     }
 
     #[test]
@@ -1113,26 +1113,26 @@ mod tests {
         #[cfg(target_family = "unix")]
         let expected: Vec<(String, Option<u64>)> = vec![
             ("tiny_tree".into(), None),
-            ("tiny_tree/file-a.txt".into(), Some(23 as u64)),
-            ("tiny_tree/file-b.txt".into(), Some(31 as u64)),
-            ("tiny_tree/file-c.txt".into(), Some(30 as u64)),
-            ("tiny_tree/link-to-c".into(), Some(10 as u64)),
+            ("tiny_tree/file-a.txt".into(), Some(23_u64)),
+            ("tiny_tree/file-b.txt".into(), Some(31_u64)),
+            ("tiny_tree/file-c.txt".into(), Some(30_u64)),
+            ("tiny_tree/link-to-c".into(), Some(10_u64)),
             ("tiny_tree/sub".into(), None),
             ("tiny_tree/sub/empty-dir".into(), None),
-            ("tiny_tree/sub/empty-file".into(), Some(0 as u64)),
-            ("tiny_tree/sub/file-1.txt".into(), Some(25 as u64)),
+            ("tiny_tree/sub/empty-file".into(), Some(0_u64)),
+            ("tiny_tree/sub/file-1.txt".into(), Some(25_u64)),
         ];
         #[cfg(target_family = "windows")]
         let expected: Vec<(String, Option<u64>)> = vec![
             ("tiny_tree".into(), None),
-            ("tiny_tree\\file-a.txt".into(), Some(24 as u64)),
-            ("tiny_tree\\file-b.txt".into(), Some(32 as u64)),
-            ("tiny_tree\\file-c.txt".into(), Some(31 as u64)),
-            ("tiny_tree\\link-to-c".into(), Some(10 as u64)),
+            ("tiny_tree\\file-a.txt".into(), Some(24_u64)),
+            ("tiny_tree\\file-b.txt".into(), Some(32_u64)),
+            ("tiny_tree\\file-c.txt".into(), Some(31_u64)),
+            ("tiny_tree\\link-to-c".into(), Some(10_u64)),
             ("tiny_tree\\sub".into(), None),
             ("tiny_tree\\sub\\empty-dir".into(), None),
-            ("tiny_tree\\sub\\empty-file".into(), Some(0 as u64)),
-            ("tiny_tree\\sub\\file-1.txt".into(), Some(26 as u64)),
+            ("tiny_tree\\sub\\empty-file".into(), Some(0_u64)),
+            ("tiny_tree\\sub\\file-1.txt".into(), Some(26_u64)),
         ];
         for (a, b) in entries.iter().zip(expected.iter()) {
             assert_eq!(a, b);
