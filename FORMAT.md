@@ -51,7 +51,7 @@ A **manifest** is a collection of **headers** that describe the files, directori
 
 ## Headers
 
-Nearly all metadata is represented with a _header_ that consists of rows of **tag**, **size**, and **value**. A header starts with 2 bytes that indicate the number of rows. Each row has a 2-byte tag, a 2-byte size, and an N-byte value, where N may any integer from 0 to 65,535. An empty header is represented as two zero bytes, meaning there are zero rows in the header. A textual value **must** be UTF-8 encoded. An integer value _should_ be serialized to the smallest number of bytes. Tags and sizes will **always** be two bytes each, so the shortest possible row will be 4 bytes in length (2 + 2 + 0). Likewise, the longest possible row will be 2 + 2 + 65,535 bytes. Tags, sizes, and numeric values are stored in network byte order (Big Endian).
+Nearly all metadata is represented with a _header_ that consists of rows of **tag**, **size**, and **value**. A header starts with 2 bytes that indicate the number of rows. Each row has a 2-byte tag, a 2-byte size, and an N-byte value, where N may any integer from 0 to 65,535. An empty header is represented as two zero bytes, meaning there are zero rows in the header. A textual value **must** be UTF-8 encoded. An integer value _should_ be serialized to the smallest number of bytes. Tags and sizes will **always** be two bytes each, so the shortest possible row will be 4 bytes in length (2 + 2 + 0). Likewise, the longest possible row will be 2 + 2 + 65,536 bytes. Tags, sizes, and numeric values are stored in network byte order (Big Endian).
 
 The order of rows in the header is **not** significant. A header should be treated as a dictionary of keys and values.
 
@@ -178,19 +178,19 @@ However, parents are not required: an entry can simply exist at the top of the a
 | Tag  | Max Size | Description                         | Required? | Type  |
 | ---- | -------- | ----------------------------------- | --------- | ----- |
 | `ID` |        4 | Unique identifier                   | yes       | `u32` |
-| `NM` |   65,535 | name of directory                   | yes       | `str` |
+| `NM` |   65,536 | name of directory                   | yes       | `str` |
 | `PA` |        4 | identifier of parent directory      |           | `u32` |
 | `MO` |        4 | Unix mode                           |           | `u32` |
 | `FA` |        4 | Windows file attributes             |           | `u32` |
 | `MT` |        8 | modification date/time as Unix time |           | `i64` |
 | `CT` |        8 | creation date/time as Unix time     |           | `i64` |
 | `AT` |        8 | access date/time as Unix time       |           | `i64` |
-| `UN` |   65,535 | name of FS owner                    |           | `str` |
+| `UN` |   65,536 | name of FS owner                    |           | `str` |
 | `UI` |        4 | user identifier                     |           | `u32` |
-| `GN` |   65,535 | name of FS group                    |           | `str` |
+| `GN` |   65,536 | name of FS group                    |           | `str` |
 | `GI` |        4 | group identifier                    |           | `u32` |
 
-Note that it is extremely unlikely that the `NM`, `UN`, and `GN` rows will have a length that is anywhere near the maximum of `65,535` -- this is merely the result of the row **size** being a 16-bit number.
+Note that it is extremely unlikely that the `NM`, `UN`, and `GN` rows will have a length that is anywhere near the maximum of `65,536` -- this is merely the result of the row **size** being a 16-bit number.
 
 #### Files
 
@@ -198,7 +198,7 @@ File entries will have this format:
 
 | Tag  | Max Size | Description                         | Required? | Type  |
 | ---- | -------- | ----------------------------------- | --------- | ----- |
-| `NM` |   65,535 | name of file                        | yes       | `str` |
+| `NM` |   65,536 | name of file                        | yes       | `str` |
 | `PA` |        4 | identifier of parent directory      |           | `u32` |
 | `LN` |        8 | total length of file in bytes       |           | `u64` |
 | `MO` |        4 | Unix mode                           |           | `u32` |
@@ -206,9 +206,9 @@ File entries will have this format:
 | `MT` |        8 | modification date/time as Unix time |           | `i64` |
 | `CT` |        8 | creation date/time as Unix time     |           | `i64` |
 | `AT` |        8 | access date/time as Unix time       |           | `i64` |
-| `UN` |   65,535 | name of FS owner                    |           | `str` |
+| `UN` |   65,536 | name of FS owner                    |           | `str` |
 | `UI` |        4 | user identifier                     |           | `u32` |
-| `GN` |   65,535 | name of FS group                    |           | `str` |
+| `GN` |   65,536 | name of FS group                    |           | `str` |
 | `GI` |        4 | group identifier                    |           | `u32` |
 
 As with directories, the `NM`, `UN`, and `GN` rows will almost certainly be much shorter than 64kb.
@@ -221,7 +221,7 @@ Typically symbolic links do not have any metadata as it depends on the operating
 
 | Tag  | Max Size | Description                    | Required? | Type  |
 | ---- | -------- | ------------------------------ | --------- | ----- |
-| `SL` |   65,535 | name of symbolic link          | yes       | `str` |
+| `SL` |   65,536 | name of symbolic link          | yes       | `str` |
 | `PA` |        4 | identifier of parent directory |           | `u32` |
 | `LN` |        8 | length of link content         |           | `u64` |
 
@@ -351,12 +351,13 @@ As alluded to above, the `ES` value will typically be smaller than 16mb due to c
 
 From the details above, several limits on the archive format can be inferred:
 
-* The number of rows in a header is encoded as 16-bits, so a header can have at most 65,535 rows.
-* Header row sizes are encoded as 16-bits, so a row value can have at most 65,535 bytes.
+* The number of rows in a header is encoded as 16-bits, so a header can have at most 65,536 rows.
+* Header row sizes are encoded as 16-bits, so a row value can have at most 65,536 bytes.
 * Algorithms are all encoded as 8-bits, limiting us to 255 compression algorithms, 255 encryption algorithms, and 255 key derivation functions.
 * File _item position_ (`IP`) values are encoded using 64-bits, limiting file sizes to around 18,446,744,073,709,551,615 bytes.
 * The number of iterations for the KDF is encoded using 32-bits, limiting us to 4,294,967,295 iterations.
 * Directory identifiers are encoded using 32-bits, so at most 4,294,967,295 directories can appear in a single archive.
+* With a maxium number of directories of 4,294,967,295 and a maximum file/directory/link name length of 65,536, the full path of a file will be 281,470,681,677,825 bytes.
 
 The content blocks have a size limit, but that is not relevant since the archive may have an unlimited number of content blocks, and as such the blocks can be sized to any reasonable length.
 
