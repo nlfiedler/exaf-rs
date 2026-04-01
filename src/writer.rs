@@ -919,13 +919,12 @@ mod tests {
         Ok(())
     }
 
-    fn sha1_from_file(infile: &Path) -> io::Result<String> {
-        use sha1::{Digest, Sha1};
+    pub fn blake3_from_file(infile: &Path) -> io::Result<String> {
         let mut file = fs::File::open(infile)?;
-        let mut hasher = Sha1::new();
+        let mut hasher = blake3::Hasher::new();
         io::copy(&mut file, &mut hasher)?;
         let digest = hasher.finalize();
-        Ok(format!("{:x}", digest))
+        Ok(format!("{}", digest).to_lowercase())
     }
 
     #[test]
@@ -945,8 +944,11 @@ mod tests {
         // extract the archive and verify everything
         let mut reader = super::reader::from_file(&archive)?;
         reader.extract_all(outdir.path())?;
-        let actual = sha1_from_file(outdir.path().join("IMG_0385.JPG").as_path())?;
-        assert_eq!(actual, "98074ad81e1ddac384cfcd23144109d4d6baa5f2");
+        let actual = blake3_from_file(outdir.path().join("IMG_0385.JPG").as_path())?;
+        assert_eq!(
+            actual,
+            "eb32e7014330a92a93dd81e3214605816b6a96533fca9f302f5fb1ca453130cd"
+        );
 
         Ok(())
     }
@@ -981,13 +983,16 @@ mod tests {
         // extract the archive and verify everything
         let mut reader = super::reader::from_file(&archive)?;
         reader.extract_all(outdir.path())?;
-        let actual = sha1_from_file(
+        let actual = blake3_from_file(
             outdir
                 .path()
                 .join("5ba33678260abc495b6c77003ddab5cc613b9ba7")
                 .as_path(),
         )?;
-        assert_eq!(actual, "5ba33678260abc495b6c77003ddab5cc613b9ba7");
+        assert_eq!(
+            actual,
+            "2a3ac65bbc905b1419430b8df173e8e68beda5be541f6c1de5797b29428d2d24"
+        );
 
         Ok(())
     }
