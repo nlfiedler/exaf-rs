@@ -176,7 +176,7 @@ impl<W: Write + Seek> Writer<W> {
         if self.prev_dir_id > 0 || self.prev_file_id > 0 {
             return Err(Error::InternalError("pack must be empty".into()));
         }
-        self.encryption = ea.clone();
+        self.encryption = ea;
         let salt = generate_salt(&kd)?;
         let params: KeyDerivationParams = Default::default();
         self.secret_key = Some(derive_key(&kd, password, &salt, &params)?);
@@ -267,7 +267,7 @@ impl<W: Write + Seek> Writer<W> {
         self.prev_dir_id += 1;
         let mut dir_entry = Entry::new(path);
         dir_entry.dir_id = Some(self.prev_dir_id);
-        // parent might be zero when buildin
+        // parent might be zero when building
         if parent > 0 {
             dir_entry.parent = Some(parent);
         }
@@ -645,7 +645,7 @@ impl HeaderBuilder {
 
     /// Add a single i64 value to the header.
     fn add_i64(&mut self, tag: u16, value: i64) -> Result<(), Error> {
-        if value <= 2_147_483_647 || value >= -2_147_483_648 {
+        if (-2_147_483_648..=2_147_483_647).contains(&value) {
             self.add_i32(tag, value as i32)
         } else {
             let tag_bytes = u16::to_be_bytes(tag);
@@ -822,6 +822,25 @@ mod tests {
         builder.write_header(&mut output)?;
         assert_eq!(output.len(), 10);
         assert_eq!(output[..], [0, 1, 0x12, 0x34, 0, 4, 0, 0, 0, 101]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_header_builder_i64_full() -> Result<(), Error> {
+        // the values used here are all too large to be squashed down
+        let mut builder = HeaderBuilder::new();
+        builder.add_i64(0x1234, i64::MAX)?;
+        let mut output: Vec<u8> = vec![];
+        builder.write_header(&mut output)?;
+        assert_eq!(output.len(), 14);
+        assert_eq!(output[..], [0, 1, 0x12, 0x34, 0, 8, 127, 255, 255, 255, 255, 255, 255, 255]);
+
+        let mut builder = HeaderBuilder::new();
+        builder.add_i64(0x1234, i64::MIN)?;
+        let mut output: Vec<u8> = vec![];
+        builder.write_header(&mut output)?;
+        assert_eq!(output.len(), 14);
+        assert_eq!(output[..], [0, 1, 0x12, 0x34, 0, 8, 128, 0, 0, 0, 0, 0, 0, 0]);
         Ok(())
     }
 

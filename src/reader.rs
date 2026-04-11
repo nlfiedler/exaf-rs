@@ -199,12 +199,15 @@ fn get_header_u16(rows: &HeaderMap, key: &u16) -> Result<Option<u16>, Error> {
 }
 
 fn pad_to_u32(row: &[u8]) -> [u8; 4] {
-    if row.len() == 1 {
-        [0, 0, 0, row[0]]
-    } else if row.len() == 2 {
+    if row.len() == 2 {
         [0, 0, row[0], row[1]]
-    } else {
+    } else if row.len() == 4 {
         [row[0], row[1], row[2], row[3]]
+    } else {
+        // either the row length is 1 or the row is malformed, so assume a
+        // length of 1 to avoid panicking by indexing out of bounds; the other
+        // values will simply be lost due to the malformed row
+        [0, 0, 0, row[0]]
     }
 }
 
@@ -219,16 +222,19 @@ fn get_header_u32(rows: &HeaderMap, key: &u16) -> Result<Option<u32>, Error> {
 }
 
 fn pad_to_u64(row: &[u8]) -> [u8; 8] {
-    if row.len() == 1 {
-        [0, 0, 0, 0, 0, 0, 0, row[0]]
-    } else if row.len() == 2 {
+    if row.len() == 2 {
         [0, 0, 0, 0, 0, 0, row[0], row[1]]
     } else if row.len() == 4 {
         [0, 0, 0, 0, row[0], row[1], row[2], row[3]]
-    } else {
+    } else if row.len() == 8 {
         [
             row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7],
         ]
+    } else {
+        // either the row length is 1 or the row is malformed, so assume a
+        // length of 1 to avoid panicking by indexing out of bounds; the other
+        // values will simply be lost due to the malformed row
+        [0, 0, 0, 0, 0, 0, 0, row[0]]
     }
 }
 
@@ -454,7 +460,7 @@ impl<R: Read + Seek> VersionedReader for ReaderV1<R> {
     fn read_n_bytes(&mut self, count: u64) -> Result<Vec<u8>, Error> {
         let input = self.input.get_mut();
         let mut taker = input.take(count);
-        let mut content: Vec<u8> = vec![];
+        let mut content = Vec::with_capacity(count as usize);
         let bytes_read = taker.read_to_end(&mut content)? as u64;
         if bytes_read != count {
             return Err(Error::UnexpectedEof);
@@ -513,13 +519,13 @@ impl Reader {
     /// Enable encryption when reading the archive, using the given passphrase.
     ///
     pub fn enable_encryption(&mut self, password: &str) -> Result<(), Error> {
-        let kd = self.header.key_algo.clone();
+        let kd = self.header.key_algo;
         if let Some(ref salt) = self.header.salt {
-            let mut params: KeyDerivationParams = Default::default();
-            params = params.time_cost(self.header.time_cost);
-            params = params.mem_cost(self.header.mem_cost);
-            params = params.para_cost(self.header.para_cost);
-            params = params.tag_length(self.header.tag_length);
+            let params = KeyDerivationParams::default()
+                .time_cost(self.header.time_cost)
+                .mem_cost(self.header.mem_cost)
+                .para_cost(self.header.para_cost)
+                .tag_length(self.header.tag_length);
             self.secret_key = Some(derive_key(&kd, password, salt, &params)?);
             Ok(())
         } else {
@@ -558,7 +564,7 @@ impl Reader {
                         };
                         if entry.dir_id.is_some() {
                             // ensure directories exist, even the empty ones
-                            let safe_path = super::sanitize_path(path)?;
+                            let safe_path = super::sanitize_path(path);
                             let fpath = output_dir.to_path_buf().join(safe_path);
                             fs::create_dir_all(&fpath)?;
                         } else {
@@ -583,7 +589,7 @@ impl Reader {
                     // process each of the outbound content elements
                     for (entry, path) in files.iter() {
                         // perform basic sanitization of the path to prevent abuse
-                        let safe_path = super::sanitize_path(path)?;
+                        let safe_path = super::sanitize_path(path);
                         let fpath = output_dir.to_path_buf().join(safe_path);
                         if entry.kind == Kind::File {
                             // make sure the file exists and is writable

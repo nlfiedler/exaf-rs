@@ -207,31 +207,31 @@ fn file_attrs<P: AsRef<Path>>(path: P) -> Option<u32> {
 /// refer to the parent directory will be stripped ("foo/../bar" will become
 /// "foo/bar").
 ///
-fn sanitize_path<P: AsRef<Path>>(dirty: P) -> Result<PathBuf, Error> {
+fn sanitize_path<P: AsRef<Path>>(dirty: P) -> PathBuf {
     let components = dirty.as_ref().components();
     let allowed = components.filter(|c| matches!(c, Component::Normal(_)));
     let mut path = PathBuf::new();
     for component in allowed {
         path = path.join(component);
     }
-    Ok(path)
+    path
 }
 
 ///
 /// Generate a salt appropriate for the given key derivation function.
 ///
 fn generate_salt(kd: &KeyDerivation) -> Result<Vec<u8>, Error> {
-    if *kd == KeyDerivation::Argon2id {
-        use argon2::password_hash::{SaltString, rand_core::OsRng};
-        let salt = SaltString::generate(&mut OsRng);
-        let mut buf: Vec<u8> = vec![0; salt.len()];
-        let bytes = salt
-            .decode_b64(&mut buf)
-            .map_err(|e| Error::InternalError(format!("argon2 failed: {}", e)))?;
-        Ok(bytes.to_vec())
-    } else {
-        // something went terribly wrong
-        Err(Error::UnsupportedKeyAlgo(255))
+    match kd {
+        KeyDerivation::Argon2id => {
+            use argon2::password_hash::{SaltString, rand_core::OsRng};
+            let salt = SaltString::generate(&mut OsRng);
+            let mut buf: Vec<u8> = vec![0; salt.len()];
+            let bytes = salt
+                .decode_b64(&mut buf)
+                .map_err(|e| Error::InternalError(format!("argon2 failed: {}", e)))?;
+            Ok(bytes.to_vec())
+        }
+        KeyDerivation::None => Err(Error::UnsupportedKeyAlgo(255)),
     }
 }
 
@@ -244,23 +244,23 @@ fn derive_key(
     salt: &[u8],
     params: &KeyDerivationParams,
 ) -> Result<Vec<u8>, Error> {
-    if *kd == KeyDerivation::Argon2id {
-        use argon2::{Algorithm, ParamsBuilder, Version};
-        let mut output: Vec<u8> = vec![0; params.tag_length as usize];
-        let mut builder: ParamsBuilder = ParamsBuilder::new();
-        builder.t_cost(params.time_cost);
-        builder.m_cost(params.mem_cost);
-        builder.p_cost(params.para_cost);
-        builder.output_len(params.tag_length as usize);
-        let kdf = builder
-            .context(Algorithm::Argon2id, Version::V0x13)
-            .map_err(|e| Error::InternalError(format!("argon2 failed: {}", e)))?;
-        kdf.hash_password_into(password.as_bytes(), salt, output.as_mut_slice())
-            .map_err(|e| Error::InternalError(format!("argon2 failed: {}", e)))?;
-        Ok(output)
-    } else {
-        // something went terribly wrong
-        Err(Error::UnsupportedKeyAlgo(255))
+    match kd {
+        KeyDerivation::Argon2id => {
+            use argon2::{Algorithm, ParamsBuilder, Version};
+            let mut output: Vec<u8> = vec![0; params.tag_length as usize];
+            let mut builder: ParamsBuilder = ParamsBuilder::new();
+            builder.t_cost(params.time_cost);
+            builder.m_cost(params.mem_cost);
+            builder.p_cost(params.para_cost);
+            builder.output_len(params.tag_length as usize);
+            let kdf = builder
+                .context(Algorithm::Argon2id, Version::V0x13)
+                .map_err(|e| Error::InternalError(format!("argon2 failed: {}", e)))?;
+            kdf.hash_password_into(password.as_bytes(), salt, output.as_mut_slice())
+                .map_err(|e| Error::InternalError(format!("argon2 failed: {}", e)))?;
+            Ok(output)
+        }
+        KeyDerivation::None => Err(Error::UnsupportedKeyAlgo(255)),
     }
 }
 
@@ -269,21 +269,21 @@ fn derive_key(
 /// containing the cipher text, and the nonce that was generated.
 ///
 fn encrypt_data(ea: &Encryption, key: &[u8], data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
-    if *ea == Encryption::AES256GCM {
-        use aes_gcm::{
-            Aes256Gcm, Key,
-            aead::{Aead, AeadCore, KeyInit, OsRng},
-        };
-        let key: &Key<Aes256Gcm> = key.into();
-        let cipher = Aes256Gcm::new(key);
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-        let ciphertext = cipher
-            .encrypt(&nonce, data)
-            .map_err(|e| Error::InternalError(format!("aes_gcm failed: {}", e)))?;
-        Ok((ciphertext, nonce.to_vec()))
-    } else {
-        // something went terribly wrong
-        Err(Error::UnsupportedEncAlgo(255))
+    match ea {
+        Encryption::AES256GCM => {
+            use aes_gcm::{
+                Aes256Gcm, Key,
+                aead::{Aead, AeadCore, KeyInit, OsRng},
+            };
+            let key: &Key<Aes256Gcm> = key.into();
+            let cipher = Aes256Gcm::new(key);
+            let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+            let ciphertext = cipher
+                .encrypt(&nonce, data)
+                .map_err(|e| Error::InternalError(format!("aes_gcm failed: {}", e)))?;
+            Ok((ciphertext, nonce.to_vec()))
+        }
+        Encryption::None => Err(Error::UnsupportedEncAlgo(255)),
     }
 }
 
@@ -292,21 +292,21 @@ fn encrypt_data(ea: &Encryption, key: &[u8], data: &[u8]) -> Result<(Vec<u8>, Ve
 /// containing the plain text.
 ///
 fn decrypt_data(ea: &Encryption, key: &[u8], data: &[u8], nonce: &[u8]) -> Result<Vec<u8>, Error> {
-    if *ea == Encryption::AES256GCM {
-        use aes_gcm::{
-            Aes256Gcm, Key,
-            aead::{Aead, AeadCore, KeyInit, generic_array::GenericArray},
-        };
-        let key: &Key<Aes256Gcm> = key.into();
-        let cipher = Aes256Gcm::new(key);
-        let nonce: &GenericArray<u8, <Aes256Gcm as AeadCore>::NonceSize> = nonce.into();
-        let plaintext = cipher
-            .decrypt(nonce, data)
-            .map_err(|e| Error::InternalError(format!("aes_gcm failed: {}", e)))?;
-        Ok(plaintext)
-    } else {
-        // something went terribly wrong
-        Err(Error::UnsupportedEncAlgo(255))
+    match ea {
+        Encryption::AES256GCM => {
+            use aes_gcm::{
+                Aes256Gcm, Key,
+                aead::{Aead, AeadCore, KeyInit, generic_array::GenericArray},
+            };
+            let key: &Key<Aes256Gcm> = key.into();
+            let cipher = Aes256Gcm::new(key);
+            let nonce: &GenericArray<u8, <Aes256Gcm as AeadCore>::NonceSize> = nonce.into();
+            let plaintext = cipher
+                .decrypt(nonce, data)
+                .map_err(|e| Error::InternalError(format!("aes_gcm failed: {}", e)))?;
+            Ok(plaintext)
+        }
+        Encryption::None => Err(Error::UnsupportedEncAlgo(255)),
     }
 }
 
@@ -352,7 +352,7 @@ impl TryFrom<u8> for Compression {
 ///
 /// Algorithm for encrypting the archive data.
 ///
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Encryption {
     /// No encryption; _default_
     None,
@@ -393,7 +393,7 @@ impl TryFrom<u8> for Encryption {
 ///
 /// Algorithm for deriving a key from a passphrase.
 ///
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum KeyDerivation {
     /// No derivation function, _default_
     None,
@@ -685,8 +685,8 @@ impl Entry {
     }
 
     /// Name of the owning user
-    pub fn user(&self) -> Option<&String> {
-        self.user.as_ref()
+    pub fn user(&self) -> Option<&str> {
+        self.user.as_deref()
     }
 
     /// Unix group identifier
@@ -695,8 +695,8 @@ impl Entry {
     }
 
     /// Name of the owning group
-    pub fn group(&self) -> Option<&String> {
-        self.group.as_ref()
+    pub fn group(&self) -> Option<&str> {
+        self.group.as_deref()
     }
 
     /// Created time
@@ -805,7 +805,7 @@ mod tests {
     }
 
     #[test]
-    fn test_kind_is_slide() {
+    fn test_kind_is_slice() {
         assert!(!Kind::File.is_slice());
         assert!(!Kind::Link.is_slice());
         assert!(Kind::Slice(0).is_slice());
@@ -836,18 +836,18 @@ mod tests {
         // need to use real paths for the canonicalize() call
         #[cfg(target_family = "windows")]
         {
-            let result = sanitize_path(Path::new("C:\\Windows"))?;
+            let result = sanitize_path(Path::new("C:\\Windows"));
             assert_eq!(result, PathBuf::from("Windows"));
         }
         #[cfg(target_family = "unix")]
         {
-            let result = sanitize_path(Path::new("/etc"))?;
+            let result = sanitize_path(Path::new("/etc"));
             assert_eq!(result, PathBuf::from("etc"));
         }
-        let result = sanitize_path(Path::new("src/lib.rs"))?;
+        let result = sanitize_path(Path::new("src/lib.rs"));
         assert_eq!(result, PathBuf::from("src/lib.rs"));
 
-        let result = sanitize_path(Path::new("/usr/../src/./lib.rs"))?;
+        let result = sanitize_path(Path::new("/usr/../src/./lib.rs"));
         assert_eq!(result, PathBuf::from("usr/src/lib.rs"));
         Ok(())
     }

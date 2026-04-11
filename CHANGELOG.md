@@ -5,6 +5,12 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 This file follows the convention described at
 [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
+## [2.0.0] - 2026-04-10
+### Changed
+- **BREAKING:** `Entry` methods `user()` and `group()` return values changed
+  from `Option<&String>` to `Option<&str>` to be more idiomatic.
+- Updated `rand_core` dependency to latest release.
+
 ## [1.2.0] - 2025-05-01
 ### Changed
 - Updated `rand_core` and `thiserror` dependencies to latest release.
