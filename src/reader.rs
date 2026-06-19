@@ -222,19 +222,27 @@ fn get_header_str(rows: &HeaderMap, key: &u16) -> Result<Option<String>, Error> 
 
 fn get_header_u8(rows: &HeaderMap, key: &u16) -> Result<Option<u8>, Error> {
     if let Some(row) = rows.get(key) {
-        Ok(Some(row[0]))
+        // a zero-length value is treated as absent rather than panicking on a
+        // malformed (empty) row
+        Ok(row.first().copied())
     } else {
         Ok(None)
     }
 }
 
+// Right-align up to `N` bytes from `row` into a big-endian array, padding the
+// front with zeros. Any bytes beyond the first `N` are ignored. This tolerates
+// malformed (short, empty, or odd-length) rows without panicking.
+fn pad_be<const N: usize>(row: &[u8]) -> [u8; N] {
+    let mut raw = [0u8; N];
+    let len = row.len().min(N);
+    raw[N - len..].copy_from_slice(&row[..len]);
+    raw
+}
+
 #[allow(dead_code)]
 fn pad_to_u16(row: &[u8]) -> [u8; 2] {
-    if row.len() == 1 {
-        [0, row[0]]
-    } else {
-        [row[0], row[1]]
-    }
+    pad_be(row)
 }
 
 #[allow(dead_code)]
@@ -249,16 +257,7 @@ fn get_header_u16(rows: &HeaderMap, key: &u16) -> Result<Option<u16>, Error> {
 }
 
 fn pad_to_u32(row: &[u8]) -> [u8; 4] {
-    if row.len() == 2 {
-        [0, 0, row[0], row[1]]
-    } else if row.len() == 4 {
-        [row[0], row[1], row[2], row[3]]
-    } else {
-        // either the row length is 1 or the row is malformed, so assume a
-        // length of 1 to avoid panicking by indexing out of bounds; the other
-        // values will simply be lost due to the malformed row
-        [0, 0, 0, row[0]]
-    }
+    pad_be(row)
 }
 
 fn get_header_u32(rows: &HeaderMap, key: &u16) -> Result<Option<u32>, Error> {
@@ -272,20 +271,7 @@ fn get_header_u32(rows: &HeaderMap, key: &u16) -> Result<Option<u32>, Error> {
 }
 
 fn pad_to_u64(row: &[u8]) -> [u8; 8] {
-    if row.len() == 2 {
-        [0, 0, 0, 0, 0, 0, row[0], row[1]]
-    } else if row.len() == 4 {
-        [0, 0, 0, 0, row[0], row[1], row[2], row[3]]
-    } else if row.len() == 8 {
-        [
-            row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7],
-        ]
-    } else {
-        // either the row length is 1 or the row is malformed, so assume a
-        // length of 1 to avoid panicking by indexing out of bounds; the other
-        // values will simply be lost due to the malformed row
-        [0, 0, 0, 0, 0, 0, 0, row[0]]
-    }
+    pad_be(row)
 }
 
 fn get_header_u64(rows: &HeaderMap, key: &u16) -> Result<Option<u64>, Error> {
@@ -300,15 +286,15 @@ fn get_header_u64(rows: &HeaderMap, key: &u16) -> Result<Option<u64>, Error> {
 
 fn get_header_time(rows: &HeaderMap, key: &u16) -> Result<Option<DateTime<Utc>>, Error> {
     if let Some(row) = rows.get(key) {
-        if row.len() == 4 {
-            let raw: [u8; 4] = row[0..4].try_into()?;
-            let secs = i32::from_be_bytes(raw);
-            Ok(DateTime::from_timestamp(secs as i64, 0))
+        // four bytes (or fewer) are interpreted as a signed 32-bit timestamp so
+        // that pre-epoch times round-trip; anything larger uses 64 bits. The
+        // safe padders tolerate malformed lengths without panicking.
+        let secs = if row.len() <= 4 {
+            i32::from_be_bytes(pad_to_u32(row)) as i64
         } else {
-            let raw: [u8; 8] = row[0..8].try_into()?;
-            let secs = i64::from_be_bytes(raw);
-            Ok(DateTime::from_timestamp(secs, 0))
-        }
+            i64::from_be_bytes(pad_to_u64(row))
+        };
+        Ok(DateTime::from_timestamp(secs, 0))
     } else {
         Ok(None)
     }
@@ -1033,6 +1019,39 @@ mod tests {
         let maybe_value = get_header_bytes(&rows, &0x1234)?;
         let value = maybe_value.unwrap();
         assert_eq!(value, "foobar".as_bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn test_pad_be_tolerates_any_length() {
+        // empty and short rows must not panic and right-align with zero padding
+        assert_eq!(pad_to_u32(&[]), [0, 0, 0, 0]);
+        assert_eq!(pad_to_u32(&[0xab]), [0, 0, 0, 0xab]);
+        assert_eq!(pad_to_u32(&[1, 2, 3]), [0, 1, 2, 3]);
+        assert_eq!(pad_to_u32(&[1, 2, 3, 4]), [1, 2, 3, 4]);
+        // rows longer than the target keep the leading bytes
+        assert_eq!(pad_to_u32(&[1, 2, 3, 4, 5]), [1, 2, 3, 4]);
+        assert_eq!(pad_to_u64(&[]), [0; 8]);
+        assert_eq!(pad_to_u64(&[9]), [0, 0, 0, 0, 0, 0, 0, 9]);
+    }
+
+    #[test]
+    fn test_get_header_u8_empty_row() -> Result<(), Error> {
+        // a tag present with a zero-length value must not panic
+        let mut rows: HeaderMap = HashMap::new();
+        rows.insert(0x1234, vec![]);
+        assert_eq!(get_header_u8(&rows, &0x1234)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_header_time_odd_length() -> Result<(), Error> {
+        // a five-byte (malformed) timestamp must decode without panicking
+        let mut rows: HeaderMap = HashMap::new();
+        rows.insert(0x1234, vec![0, 0, 0, 0, 1]);
+        assert!(get_header_time(&rows, &0x1234)?.is_some());
+        rows.insert(0x1234, vec![]);
+        assert!(get_header_time(&rows, &0x1234)?.is_some());
         Ok(())
     }
 
