@@ -92,6 +92,56 @@ impl PathBuilder {
     }
 }
 
+//
+// Create the directory described by `relative` underneath `base`, creating any
+// intermediate directories as needed. Refuses to traverse a symbolic link (or
+// any non-directory) encountered along the way, which prevents a malicious
+// archive from redirecting writes outside of the destination directory via a
+// symlink planted by an earlier entry.
+//
+fn safe_create_dir(base: &Path, relative: &Path) -> Result<PathBuf, Error> {
+    let mut current = base.to_path_buf();
+    for component in relative.components() {
+        if let std::path::Component::Normal(name) = component {
+            current.push(name);
+            match fs::symlink_metadata(&current) {
+                Ok(meta) => {
+                    if meta.file_type().is_symlink() || !meta.is_dir() {
+                        return Err(Error::UnsafePath(current.to_string_lossy().into_owned()));
+                    }
+                }
+                Err(_) => fs::create_dir(&current)?,
+            }
+        }
+    }
+    Ok(current)
+}
+
+//
+// Resolve the full output path for a file or symbolic link entry, safely
+// creating the parent directories. Returns `None` if the sanitized path has no
+// file name component. Returns an error if the final destination already exists
+// as a symbolic link, since writing to (or through) it could place data at an
+// arbitrary location outside of the destination directory.
+//
+fn safe_output_path(base: &Path, relative: &Path) -> Result<Option<PathBuf>, Error> {
+    let parent = match relative.parent() {
+        Some(p) => safe_create_dir(base, p)?,
+        None => base.to_path_buf(),
+    };
+    let name = match relative.file_name() {
+        Some(n) => n,
+        None => return Ok(None),
+    };
+    let full = parent.join(name);
+    if let Ok(meta) = fs::symlink_metadata(&full)
+        && meta.file_type().is_symlink()
+    {
+        return Err(Error::UnsafePath(full.to_string_lossy().into_owned()));
+    }
+    Ok(Some(full))
+}
+
 // describes a file/link that will be extracted from the content block
 #[derive(Debug)]
 struct OutboundContent {
@@ -563,19 +613,32 @@ impl Reader {
                             PathBuf::from(entry.name)
                         };
                         if entry.dir_id.is_some() {
-                            // ensure directories exist, even the empty ones
+                            // ensure directories exist, even the empty ones,
+                            // refusing to traverse any planted symbolic link
                             let safe_path = super::sanitize_path(path);
-                            let fpath = output_dir.to_path_buf().join(safe_path);
-                            fs::create_dir_all(&fpath)?;
+                            safe_create_dir(output_dir, &safe_path)?;
                         } else {
                             let oc = OutboundContent::try_from(entry_rows.clone())?;
                             files.push((oc, path));
                         }
                     }
 
+                    // the manifest entries declare how many bytes the content
+                    // block occupies once decompressed; use that as a hard limit
+                    // when decompressing to guard against decompression bombs
+                    let expected_len: u64 = files
+                        .iter()
+                        .map(|(oc, _)| oc.contentpos + oc.size)
+                        .max()
+                        .unwrap_or(0);
                     let mut content = self.read_content()?;
                     if manifest.comp_algo == Compression::ZStandard {
-                        zstd::stream::copy_decode(content.as_slice(), &mut buffer)?;
+                        let decoder = zstd::stream::read::Decoder::new(content.as_slice())?;
+                        let mut limited = decoder.take(expected_len + 1);
+                        limited.read_to_end(&mut buffer)?;
+                        if buffer.len() as u64 > expected_len {
+                            return Err(Error::DecompressionBomb);
+                        }
                     } else {
                         // the only remaining option is copy (keep the larger buffer
                         // to optimize memory management)
@@ -588,16 +651,21 @@ impl Reader {
 
                     // process each of the outbound content elements
                     for (entry, path) in files.iter() {
-                        // perform basic sanitization of the path to prevent abuse
+                        // sanitize the path and resolve it safely, refusing to
+                        // follow any symbolic link that could redirect the write
+                        // outside of the destination directory
                         let safe_path = super::sanitize_path(path);
-                        let fpath = output_dir.to_path_buf().join(safe_path);
+                        let fpath = match safe_output_path(output_dir, &safe_path)? {
+                            Some(p) => p,
+                            None => continue,
+                        };
                         if entry.kind == Kind::File {
                             // make sure the file exists and is writable
                             let mut output = fs::OpenOptions::new()
                                 .create(true)
                                 .append(true)
                                 .open(&fpath)?;
-                            let file_len = fs::metadata(fpath)?.len();
+                            let file_len = fs::metadata(&fpath)?.len();
                             if file_len == 0 {
                                 // just created a new file, count it
                                 file_count += 1;
@@ -965,6 +1033,63 @@ mod tests {
         let maybe_value = get_header_bytes(&rows, &0x1234)?;
         let value = maybe_value.unwrap();
         assert_eq!(value, "foobar".as_bytes());
+        Ok(())
+    }
+
+    #[cfg(target_family = "unix")]
+    #[test]
+    fn test_safe_create_dir_refuses_symlink() -> Result<(), Error> {
+        use std::os::unix::fs::symlink;
+        use tempfile::tempdir;
+        // base is the destination directory; "escape" is a sibling that an
+        // attacker would attempt to reach by planting a symlink
+        let outdir = tempdir()?;
+        let base = outdir.path().join("base");
+        fs::create_dir(&base)?;
+        let escape = outdir.path().join("escape");
+        fs::create_dir(&escape)?;
+        // simulate a symlink entry having been extracted earlier
+        symlink(&escape, base.join("link"))?;
+        // a later directory entry tries to traverse the planted symlink
+        let result = safe_create_dir(&base, Path::new("link/sub"));
+        assert!(matches!(result, Err(Error::UnsafePath(_))));
+        // nothing should have been created inside the escape target
+        assert!(!escape.join("sub").exists());
+        Ok(())
+    }
+
+    #[cfg(target_family = "unix")]
+    #[test]
+    fn test_safe_output_path_refuses_symlink_traversal() -> Result<(), Error> {
+        use std::os::unix::fs::symlink;
+        use tempfile::tempdir;
+        let outdir = tempdir()?;
+        let base = outdir.path().join("base");
+        fs::create_dir(&base)?;
+        let escape = outdir.path().join("escape");
+        fs::create_dir(&escape)?;
+        // a symlink directory planted by an earlier entry
+        symlink(&escape, base.join("link"))?;
+        // a file entry attempting to be written through the symlink
+        let result = safe_output_path(&base, Path::new("link/passwd"));
+        assert!(matches!(result, Err(Error::UnsafePath(_))));
+        // and a file entry whose final name is itself an existing symlink
+        symlink(escape.join("target"), base.join("evil"))?;
+        let result = safe_output_path(&base, Path::new("evil"));
+        assert!(matches!(result, Err(Error::UnsafePath(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn test_safe_output_path_creates_parents() -> Result<(), Error> {
+        use tempfile::tempdir;
+        let outdir = tempdir()?;
+        let base = outdir.path().join("base");
+        fs::create_dir(&base)?;
+        let resolved = safe_output_path(&base, Path::new("a/b/file.txt"))?;
+        let full = resolved.expect("should have a file name");
+        assert_eq!(full, base.join("a").join("b").join("file.txt"));
+        assert!(base.join("a").join("b").is_dir());
         Ok(())
     }
 

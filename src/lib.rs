@@ -82,6 +82,14 @@ pub enum Error {
     /// The symbolic link bytes were not decipherable.
     #[error("symbolic link encoding was not recognized")]
     LinkTextEncoding,
+    /// An entry in the archive attempted to escape the destination directory,
+    /// typically by way of a symbolic link planted earlier in the archive.
+    #[error("unsafe path in archive: {0}")]
+    UnsafePath(String),
+    /// Decompressed content exceeded the size declared by the manifest, which
+    /// is indicative of a decompression bomb.
+    #[error("decompressed content exceeds declared size (possible decompression bomb)")]
+    DecompressionBomb,
     /// File header lacks the initial `E,X,A,F` bytes.
     #[error("missing magic 'EXAF' number")]
     MissingMagic,
