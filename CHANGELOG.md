@@ -5,6 +5,32 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 This file follows the convention described at
 [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+### Security
+- Prevent symlink-based path traversal during extraction. A malicious archive
+  could plant a symbolic link entry and then write files "through" it to
+  locations outside the destination directory; extraction now refuses to
+  traverse or overwrite symbolic links.
+- Bound Zstandard decompression by the size declared in the manifest to guard
+  against decompression bombs.
+- Reject a declared content/block size larger than the bytes remaining in the
+  archive before allocating, so a tiny crafted file cannot force a
+  multi-gigabyte allocation.
+- Clamp the Argon2 key-derivation parameters (memory, time, parallelism, and
+  tag length) read from the archive header before deriving the key, preventing
+  a memory/CPU exhaustion denial-of-service when opening an encrypted archive.
+- Validate the AES-256-GCM key and nonce lengths, returning an error instead of
+  panicking on a malformed encryption header.
+- Avoid panics when parsing malformed archive headers containing empty, short,
+  or odd-length values.
+### Changed
+- **BREAKING:** The public `Error` enum is now annotated `#[non_exhaustive]`, so
+  downstream `match` expressions must include a wildcard arm. This is a breaking
+  change under Rust semver and requires a major version bump, but it allows
+  future error variants to be added without further breakage.
+- Added the `Error::UnsafePath`, `Error::DecompressionBomb`, and
+  `Error::InvalidKdfParams` variants.
+
 ## [2.0.0] - 2026-04-10
 ### Changed
 - **BREAKING:** `Entry` methods `user()` and `group()` return values changed
