@@ -114,6 +114,10 @@ pub enum Error {
     /// Key derivation function in archive is not supported.
     #[error("unsupported key derivation function {0}")]
     UnsupportedKeyAlgo(u8),
+    /// Key derivation parameters in the archive were outside the allowed range,
+    /// or produced a key whose length does not match the cipher.
+    #[error("invalid key derivation parameters: {0}")]
+    InvalidKdfParams(String),
     /// A header was missing a required tag row.
     #[error("missing required tag from header: {0}")]
     MissingTag(String),
@@ -243,6 +247,15 @@ fn generate_salt(kd: &KeyDerivation) -> Result<Vec<u8>, Error> {
     }
 }
 
+// Upper bounds on the key-derivation parameters that are read from an
+// (untrusted) archive header. These prevent a malicious archive from requesting
+// an absurd amount of memory or CPU during key derivation, which would
+// otherwise be a denial-of-service for anyone opening the archive.
+const MAX_KDF_MEM_COST: u32 = 1 << 20; // 1 GiB, expressed in 1 KiB blocks
+const MAX_KDF_TIME_COST: u32 = 64;
+const MAX_KDF_PARA_COST: u32 = 16;
+const MAX_KDF_TAG_LENGTH: u32 = 1024;
+
 ///
 /// Produce a secret key from a passphrase and random salt.
 ///
@@ -255,6 +268,32 @@ fn derive_key(
     match kd {
         KeyDerivation::Argon2id => {
             use argon2::{Algorithm, ParamsBuilder, Version};
+            // reject out-of-range parameters before performing the (potentially
+            // very expensive) derivation
+            if params.mem_cost > MAX_KDF_MEM_COST {
+                return Err(Error::InvalidKdfParams(format!(
+                    "memory cost {} exceeds maximum {}",
+                    params.mem_cost, MAX_KDF_MEM_COST
+                )));
+            }
+            if params.time_cost > MAX_KDF_TIME_COST {
+                return Err(Error::InvalidKdfParams(format!(
+                    "time cost {} exceeds maximum {}",
+                    params.time_cost, MAX_KDF_TIME_COST
+                )));
+            }
+            if params.para_cost > MAX_KDF_PARA_COST {
+                return Err(Error::InvalidKdfParams(format!(
+                    "parallelism {} exceeds maximum {}",
+                    params.para_cost, MAX_KDF_PARA_COST
+                )));
+            }
+            if params.tag_length > MAX_KDF_TAG_LENGTH {
+                return Err(Error::InvalidKdfParams(format!(
+                    "tag length {} exceeds maximum {}",
+                    params.tag_length, MAX_KDF_TAG_LENGTH
+                )));
+            }
             let mut output: Vec<u8> = vec![0; params.tag_length as usize];
             let mut builder: ParamsBuilder = ParamsBuilder::new();
             builder.t_cost(params.time_cost);
@@ -283,6 +322,12 @@ fn encrypt_data(ea: &Encryption, key: &[u8], data: &[u8]) -> Result<(Vec<u8>, Ve
                 Aes256Gcm, Key,
                 aead::{Aead, AeadCore, KeyInit, OsRng},
             };
+            if key.len() != 32 {
+                return Err(Error::InvalidKdfParams(format!(
+                    "AES-256-GCM requires a 32-byte key, got {}",
+                    key.len()
+                )));
+            }
             let key: &Key<Aes256Gcm> = key.into();
             let cipher = Aes256Gcm::new(key);
             let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
@@ -304,10 +349,29 @@ fn decrypt_data(ea: &Encryption, key: &[u8], data: &[u8], nonce: &[u8]) -> Resul
         Encryption::AES256GCM => {
             use aes_gcm::{
                 Aes256Gcm, Key,
-                aead::{Aead, AeadCore, KeyInit, generic_array::GenericArray},
+                aead::{
+                    Aead, AeadCore, KeyInit,
+                    generic_array::{GenericArray, typenum::Unsigned},
+                },
             };
+            if key.len() != 32 {
+                return Err(Error::InvalidKdfParams(format!(
+                    "AES-256-GCM requires a 32-byte key, got {}",
+                    key.len()
+                )));
+            }
             let key: &Key<Aes256Gcm> = key.into();
             let cipher = Aes256Gcm::new(key);
+            // the nonce comes from the (untrusted) archive header; verify its
+            // length matches the cipher to avoid a panic on conversion
+            let nonce_size = <Aes256Gcm as AeadCore>::NonceSize::to_usize();
+            if nonce.len() != nonce_size {
+                return Err(Error::InvalidKdfParams(format!(
+                    "AES-256-GCM requires a {}-byte nonce, got {}",
+                    nonce_size,
+                    nonce.len()
+                )));
+            }
             let nonce: &GenericArray<u8, <Aes256Gcm as AeadCore>::NonceSize> = nonce.into();
             let plaintext = cipher
                 .decrypt(nonce, data)
@@ -961,6 +1025,36 @@ mod tests {
         let secret = derive_key(&KeyDerivation::Argon2id, password, &salt, &params)?;
         assert_eq!(secret.len(), 32);
         assert_ne!(password.as_bytes(), secret.as_slice());
+        Ok(())
+    }
+
+    #[test]
+    fn test_derive_key_rejects_excessive_params() -> Result<(), Error> {
+        let password = "keyboard cat";
+        let salt = generate_salt(&KeyDerivation::Argon2id)?;
+        // an archive requesting a huge memory cost must be rejected quickly
+        // rather than attempting a multi-gigabyte allocation
+        let params = KeyDerivationParams::default().mem_cost(Some(MAX_KDF_MEM_COST + 1));
+        let result = derive_key(&KeyDerivation::Argon2id, password, &salt, &params);
+        assert!(matches!(result, Err(Error::InvalidKdfParams(_))));
+        // an excessive tag length is likewise rejected before allocating
+        let params = KeyDerivationParams::default().tag_length(Some(MAX_KDF_TAG_LENGTH + 1));
+        let result = derive_key(&KeyDerivation::Argon2id, password, &salt, &params);
+        assert!(matches!(result, Err(Error::InvalidKdfParams(_))));
+        Ok(())
+    }
+
+    #[test]
+    fn test_decrypt_rejects_bad_key_and_nonce_length() -> Result<(), Error> {
+        // a wrong-length key must yield an error rather than panicking on the
+        // conversion to an AES-256 key
+        let short_key = vec![0u8; 16];
+        let result = decrypt_data(&Encryption::AES256GCM, &short_key, &[0u8; 32], &[0u8; 12]);
+        assert!(matches!(result, Err(Error::InvalidKdfParams(_))));
+        // a wrong-length nonce must likewise yield an error
+        let good_key = vec![0u8; 32];
+        let result = decrypt_data(&Encryption::AES256GCM, &good_key, &[0u8; 32], &[0u8; 8]);
+        assert!(matches!(result, Err(Error::InvalidKdfParams(_))));
         Ok(())
     }
 

@@ -495,6 +495,15 @@ impl<R: Read + Seek> VersionedReader for ReaderV1<R> {
 
     fn read_n_bytes(&mut self, count: u64) -> Result<Vec<u8>, Error> {
         let input = self.input.get_mut();
+        // reject a count that exceeds the bytes actually remaining in the input
+        // before allocating, so a crafted size field in the archive cannot
+        // trigger a multi-gigabyte allocation from a tiny file
+        let current = input.stream_position()?;
+        let end = input.seek(SeekFrom::End(0))?;
+        input.seek(SeekFrom::Start(current))?;
+        if count > end - current {
+            return Err(Error::UnexpectedEof);
+        }
         let mut taker = input.take(count);
         let mut content = Vec::with_capacity(count as usize);
         let bytes_read = taker.read_to_end(&mut content)? as u64;
