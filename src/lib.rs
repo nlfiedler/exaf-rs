@@ -69,6 +69,7 @@ use std::time::SystemTime;
 
 /// This type represents all possible errors that can occur within this crate.
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// Error occurred during IO related operation.
     #[error("I/O error: {0}")]
