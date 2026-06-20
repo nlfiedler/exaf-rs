@@ -5,7 +5,7 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 This file follows the convention described at
 [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [3.0.0] - 2026-06-19
 ### Security
 - Prevent symlink-based path traversal during extraction. A malicious archive
   could plant a symbolic link entry and then write files "through" it to
