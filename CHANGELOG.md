@@ -14,6 +14,13 @@ This file follows the convention described at
 - The `Compression` enum is now part of the public API, and `Compression::None`
   is selectable to store content uncompressed (the `CA` row is elided, and the
   reader defaults an absent `CA` row to _none_).
+- Optional **scrypt** key derivation as an alternative to Argon2id, selectable
+  via `KeyDerivation::Scrypt` in `Writer::enable_encryption`. Gated behind the
+  `scrypt` crate feature (off by default). The archive format records this as
+  key derivation algorithm (`KD`) value `2`. For scrypt the shared cost rows are
+  reinterpreted as `log2(N)`, block size `r`, and parallelism `p`, with their
+  own bounds enforced to guard against resource-exhaustion when reading an
+  untrusted archive.
 
 ## [3.0.0] - 2026-06-19
 ### Added

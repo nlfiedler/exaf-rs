@@ -244,6 +244,14 @@ fn generate_salt(kd: &KeyDerivation) -> Result<Vec<u8>, Error> {
                 .map_err(|e| Error::InternalError(format!("argon2 failed: {}", e)))?;
             Ok(bytes.to_vec())
         }
+        #[cfg(feature = "scrypt")]
+        KeyDerivation::Scrypt => {
+            // scrypt imposes no salt encoding; use 16 random bytes
+            use argon2::password_hash::rand_core::{OsRng, RngCore};
+            let mut salt = vec![0u8; 16];
+            OsRng.fill_bytes(&mut salt);
+            Ok(salt)
+        }
         KeyDerivation::None => Err(Error::UnsupportedKeyAlgo(255)),
     }
 }
@@ -256,6 +264,18 @@ const MAX_KDF_MEM_COST: u32 = 1 << 20; // 1 GiB, expressed in 1 KiB blocks
 const MAX_KDF_TIME_COST: u32 = 64;
 const MAX_KDF_PARA_COST: u32 = 16;
 const MAX_KDF_TAG_LENGTH: u32 = 1024;
+
+// Upper bounds specific to scrypt, whose cost parameters scale differently from
+// Argon2's: the work factor N is 2^log_n and the working memory is roughly
+// 128 * r * N bytes, so these are bounded both individually and in combination.
+#[cfg(feature = "scrypt")]
+const MAX_SCRYPT_LOG_N: u32 = 20; // N up to 2^20; also guards the 1<<log_n shift
+#[cfg(feature = "scrypt")]
+const MAX_SCRYPT_R: u32 = 32;
+#[cfg(feature = "scrypt")]
+const MAX_SCRYPT_PARA: u32 = 16;
+#[cfg(feature = "scrypt")]
+const MAX_KDF_MEM_BYTES: u64 = 1 << 30; // 1 GiB ceiling on scrypt working memory
 
 ///
 /// Produce a secret key from a passphrase and random salt.
@@ -306,6 +326,54 @@ fn derive_key(
                 .map_err(|e| Error::InternalError(format!("argon2 failed: {}", e)))?;
             kdf.hash_password_into(password.as_bytes(), salt, output.as_mut_slice())
                 .map_err(|e| Error::InternalError(format!("argon2 failed: {}", e)))?;
+            Ok(output)
+        }
+        #[cfg(feature = "scrypt")]
+        KeyDerivation::Scrypt => {
+            // the shared cost fields are reinterpreted for scrypt: time_cost is
+            // log2(N), mem_cost is the block size (r), and para_cost is the
+            // parallelism (p); reject out-of-range values before deriving
+            let log_n = params.time_cost;
+            let r = params.mem_cost;
+            let p = params.para_cost;
+            if log_n > MAX_SCRYPT_LOG_N {
+                return Err(Error::InvalidKdfParams(format!(
+                    "scrypt log_n {} exceeds maximum {}",
+                    log_n, MAX_SCRYPT_LOG_N
+                )));
+            }
+            if r == 0 || r > MAX_SCRYPT_R {
+                return Err(Error::InvalidKdfParams(format!(
+                    "scrypt block size {} out of range (1..={})",
+                    r, MAX_SCRYPT_R
+                )));
+            }
+            if p == 0 || p > MAX_SCRYPT_PARA {
+                return Err(Error::InvalidKdfParams(format!(
+                    "scrypt parallelism {} out of range (1..={})",
+                    p, MAX_SCRYPT_PARA
+                )));
+            }
+            if params.tag_length > MAX_KDF_TAG_LENGTH {
+                return Err(Error::InvalidKdfParams(format!(
+                    "tag length {} exceeds maximum {}",
+                    params.tag_length, MAX_KDF_TAG_LENGTH
+                )));
+            }
+            // bound the worst-case working memory (~128 * r * 2^log_n bytes);
+            // log_n is already capped, so the shift cannot overflow
+            let mem_bytes = 128u64 * (r as u64) * (1u64 << log_n);
+            if mem_bytes > MAX_KDF_MEM_BYTES {
+                return Err(Error::InvalidKdfParams(format!(
+                    "scrypt memory {} bytes exceeds maximum {}",
+                    mem_bytes, MAX_KDF_MEM_BYTES
+                )));
+            }
+            let mut output: Vec<u8> = vec![0; params.tag_length as usize];
+            let sparams = scrypt::Params::new(log_n as u8, r, p, params.tag_length as usize)
+                .map_err(|e| Error::InvalidKdfParams(format!("scrypt params: {}", e)))?;
+            scrypt::scrypt(password.as_bytes(), salt, &sparams, output.as_mut_slice())
+                .map_err(|e| Error::InternalError(format!("scrypt failed: {}", e)))?;
             Ok(output)
         }
         KeyDerivation::None => Err(Error::UnsupportedKeyAlgo(255)),
@@ -544,6 +612,9 @@ pub enum KeyDerivation {
     None,
     /// Use the Argon2id KDF
     Argon2id,
+    /// Use the scrypt KDF. Requires the `scrypt` crate feature.
+    #[cfg(feature = "scrypt")]
+    Scrypt,
 }
 
 impl fmt::Display for KeyDerivation {
@@ -551,6 +622,8 @@ impl fmt::Display for KeyDerivation {
         match self {
             KeyDerivation::None => write!(f, "none"),
             KeyDerivation::Argon2id => write!(f, "Argon2id"),
+            #[cfg(feature = "scrypt")]
+            KeyDerivation::Scrypt => write!(f, "scrypt"),
         }
     }
 }
@@ -560,6 +633,8 @@ impl From<KeyDerivation> for u8 {
         match val {
             KeyDerivation::None => 0,
             KeyDerivation::Argon2id => 1,
+            #[cfg(feature = "scrypt")]
+            KeyDerivation::Scrypt => 2,
         }
     }
 }
@@ -571,6 +646,8 @@ impl TryFrom<u8> for KeyDerivation {
         match value {
             0 => Ok(KeyDerivation::None),
             1 => Ok(KeyDerivation::Argon2id),
+            #[cfg(feature = "scrypt")]
+            2 => Ok(KeyDerivation::Scrypt),
             v => Err(self::Error::UnsupportedKeyAlgo(v)),
         }
     }
@@ -593,6 +670,28 @@ pub struct KeyDerivationParams {
 }
 
 impl KeyDerivationParams {
+    ///
+    /// Default parameters appropriate for the given key derivation function.
+    ///
+    /// The shared cost fields are interpreted differently per KDF. For Argon2id
+    /// they are the OWASP-recommended time/memory/parallelism costs. For scrypt
+    /// the fields are reinterpreted as `log2(N)` (time cost), the block size `r`
+    /// (memory cost), and the parallelism `p` (parallelism cost).
+    ///
+    pub fn for_algorithm(kd: &KeyDerivation) -> Self {
+        match kd {
+            #[cfg(feature = "scrypt")]
+            KeyDerivation::Scrypt => Self {
+                time_cost: 15, // log2(N), so N = 32768
+                mem_cost: 8,   // block size (r)
+                para_cost: 1,  // parallelism (p)
+                tag_length: 32,
+            },
+            // Argon2id and None use the Argon2-oriented defaults
+            _ => Self::default(),
+        }
+    }
+
     ///
     /// Set the time cost from the optional value found in the archive.
     ///
@@ -1092,10 +1191,25 @@ mod tests {
         let value = result.unwrap();
         assert_eq!(value, KeyDerivation::Argon2id);
 
-        let result = KeyDerivation::try_from(2);
+        #[cfg(feature = "scrypt")]
+        {
+            let result = KeyDerivation::try_from(2);
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), KeyDerivation::Scrypt);
+        }
+        #[cfg(not(feature = "scrypt"))]
+        {
+            // without the scrypt feature, value 2 is unsupported
+            let result = KeyDerivation::try_from(2);
+            assert!(result.is_err());
+            let err_string = result.err().unwrap().to_string();
+            assert_eq!(err_string, "unsupported key derivation function 2");
+        }
+
+        let result = KeyDerivation::try_from(3);
         assert!(result.is_err());
         let err_string = result.err().unwrap().to_string();
-        assert_eq!(err_string, "unsupported key derivation function 2");
+        assert_eq!(err_string, "unsupported key derivation function 3");
     }
 
     #[test]
@@ -1105,6 +1219,12 @@ mod tests {
 
         let value: u8 = KeyDerivation::Argon2id.into();
         assert_eq!(value, 1);
+
+        #[cfg(feature = "scrypt")]
+        {
+            let value: u8 = KeyDerivation::Scrypt.into();
+            assert_eq!(value, 2);
+        }
     }
 
     #[test]
@@ -1142,6 +1262,41 @@ mod tests {
         // an excessive tag length is likewise rejected before allocating
         let params = KeyDerivationParams::default().tag_length(Some(MAX_KDF_TAG_LENGTH + 1));
         let result = derive_key(&KeyDerivation::Argon2id, password, &salt, &params);
+        assert!(matches!(result, Err(Error::InvalidKdfParams(_))));
+        Ok(())
+    }
+
+    #[cfg(feature = "scrypt")]
+    #[test]
+    fn test_derive_key_scrypt() -> Result<(), Error> {
+        let password = "keyboard cat";
+        let salt = generate_salt(&KeyDerivation::Scrypt)?;
+        assert_eq!(salt.len(), 16);
+        let params = KeyDerivationParams::for_algorithm(&KeyDerivation::Scrypt);
+        let secret = derive_key(&KeyDerivation::Scrypt, password, &salt, &params)?;
+        assert_eq!(secret.len(), 32);
+        assert_ne!(password.as_bytes(), secret.as_slice());
+        // the same inputs must produce the same key
+        let again = derive_key(&KeyDerivation::Scrypt, password, &salt, &params)?;
+        assert_eq!(secret, again);
+        Ok(())
+    }
+
+    #[cfg(feature = "scrypt")]
+    #[test]
+    fn test_derive_key_scrypt_rejects_excessive_params() -> Result<(), Error> {
+        let password = "keyboard cat";
+        let salt = generate_salt(&KeyDerivation::Scrypt)?;
+        // an absurd cost factor (log_n) must be rejected before deriving
+        let params = KeyDerivationParams::for_algorithm(&KeyDerivation::Scrypt)
+            .time_cost(Some(MAX_SCRYPT_LOG_N + 1));
+        let result = derive_key(&KeyDerivation::Scrypt, password, &salt, &params);
+        assert!(matches!(result, Err(Error::InvalidKdfParams(_))));
+        // a combination that would exceed the memory ceiling is also rejected
+        let params = KeyDerivationParams::for_algorithm(&KeyDerivation::Scrypt)
+            .time_cost(Some(MAX_SCRYPT_LOG_N))
+            .mem_cost(Some(MAX_SCRYPT_R));
+        let result = derive_key(&KeyDerivation::Scrypt, password, &salt, &params);
         assert!(matches!(result, Err(Error::InvalidKdfParams(_))));
         Ok(())
     }
@@ -1509,6 +1664,44 @@ mod tests {
         assert_eq!(actual, "the lamb was sure to go.\n");
         #[cfg(target_family = "windows")]
         assert_eq!(actual, "the lamb was sure to go.\r\n");
+        Ok(())
+    }
+
+    #[cfg(feature = "scrypt")]
+    #[test]
+    fn test_create_list_extract_scrypt() -> Result<(), Error> {
+        // git does not track empty directories
+        std::fs::create_dir_all("test/fixtures/version1/tiny_tree/sub/empty-dir")?;
+        // create an archive whose key is derived with scrypt
+        let outdir = tempdir()?;
+        let archive = outdir.path().join("archive.exa");
+        let output = std::fs::File::create(&archive)?;
+        let mut builder = super::writer::Writer::new(output)?;
+        builder.enable_encryption(
+            super::KeyDerivation::Scrypt,
+            super::Encryption::AES256GCM,
+            "Passw0rd!",
+        )?;
+        builder.add_dir_all("test/fixtures/version1/tiny_tree")?;
+        builder.finish()?;
+
+        // extract the archive and verify a file round-trips
+        let mut reader = super::reader::from_file(&archive)?;
+        assert!(reader.is_encrypted());
+        reader.enable_encryption("Passw0rd!")?;
+        reader.extract_all(outdir.path())?;
+        let actual = std::fs::read_to_string(outdir.path().join("tiny_tree").join("file-a.txt"))?;
+        #[cfg(target_family = "unix")]
+        assert_eq!(actual, "mary had a little lamb\n");
+        #[cfg(target_family = "windows")]
+        assert_eq!(actual, "mary had a little lamb\r\n");
+
+        // the wrong passphrase must fail to decrypt
+        let mut reader = super::reader::from_file(&archive)?;
+        reader.enable_encryption("wrong")?;
+        let bad = outdir.path().join("bad");
+        std::fs::create_dir_all(&bad)?;
+        assert!(reader.extract_all(&bad).is_err());
         Ok(())
     }
 

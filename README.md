@@ -4,7 +4,7 @@ The EXtensible Archiver Format describes an [archive file](https://en.wikipedia.
 
 ## Specification
 
-See the [FORMAT.md](./FORMAT.md) document for the details on the current format, which specifies Zstandard for compression, with Xz/LZMA2 as an alternative, and the Argon2id key-derivation function, along with the AES256-GCM or ChaCha20-Poly1305 cipher, for encryption. Future versions may add support for other algorithms as appropriate.
+See the [FORMAT.md](./FORMAT.md) document for the details on the current format, which specifies Zstandard for compression, with Xz/LZMA2 as an alternative, and the Argon2id or scrypt key-derivation function, along with the AES256-GCM or ChaCha20-Poly1305 cipher, for encryption. Future versions may add support for other algorithms as appropriate.
 
 In short, the file consists of a short header which may include encryption details, followed by a manifest of directories, files, and symbolic links which are contained in the following compressed block of content. These content blocks may contain many files, up to a predefined total size, which are then compressed using Zstandard. If using encryption, the manifest and compressed content block will be encrypted with the derived key and a unique nonce. The manifest/content pair can be followed by as many additional pairs as are needed to contain everything that will be written to the archive.
 
@@ -12,6 +12,7 @@ In short, the file consists of a short header which may include encryption detai
 
 ### Optional Features
 
+* `scrypt`: Enable the scrypt key derivation function as an alternative to the default Argon2id.
 * `xz`: Enable support for Xz/LZMA2 compression, in addition to the default Zstandard. Requires the `liblzma` library.
 
 ## Build and Run

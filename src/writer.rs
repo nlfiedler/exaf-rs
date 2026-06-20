@@ -186,7 +186,7 @@ impl<W: Write + Seek> Writer<W> {
         }
         self.encryption = ea;
         let salt = generate_salt(&kd)?;
-        let params: KeyDerivationParams = Default::default();
+        let params = KeyDerivationParams::for_algorithm(&kd);
         self.secret_key = Some(derive_key(&kd, password, &salt, &params)?);
         // reset the output position and write out a new archive header that
         // includes the encryption information provided

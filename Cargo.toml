@@ -22,6 +22,7 @@ chrono = "0.4.37"
 libc = "0.2.153"
 os_str_bytes = { version = "7.0.0", features = ["conversions"] }
 rand_core = "0.10.0"
+scrypt = { version = "0.11.0", optional = true }
 thiserror = "2.0.12"
 xz2 = { version = "0.1.7", optional = true }
 zstd = "0.13.1"
@@ -35,6 +36,8 @@ default = []
 # Enable XZ (LZMA2) as an alternative content compression algorithm. Pulls in
 # liblzma via the `xz2` crate.
 xz = ["dep:xz2"]
+# Enable scrypt as an alternative password-based key derivation function.
+scrypt = ["dep:scrypt"]
 
 [package.metadata.docs.rs]
 all-features = true

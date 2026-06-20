@@ -566,7 +566,7 @@ impl Reader {
     pub fn enable_encryption(&mut self, password: &str) -> Result<(), Error> {
         let kd = self.header.key_algo;
         if let Some(ref salt) = self.header.salt {
-            let params = KeyDerivationParams::default()
+            let params = KeyDerivationParams::for_algorithm(&kd)
                 .time_cost(self.header.time_cost)
                 .mem_cost(self.header.mem_cost)
                 .para_cost(self.header.para_cost)

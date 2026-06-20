@@ -309,13 +309,15 @@ As a reminder, the archive header rows related to encryption are as follows:
 | `PC` | optional degree of parallelism for KDF (_parallelism cost_) | 4 | `u32` |
 | `TL` | optional number of bytes of output for KDF (_tag length_) | 4 | `u32` |
 
-The values for `EA` at this time are `0` for _none_, `1` for the **AES256-GCM AEAD** cipher, and `2` for the **ChaCha20-Poly1305 AEAD** cipher. Similarly, the `KD` can be `0` for _none_ and `1` for the **Argon2id** key derivation function (KDF). When creating an archive, rather than have `EA` or `KD` rows whose values are `0` it is better to simply elide the rows entirely as _none_ will be the default.
+The values for `EA` at this time are `0` for _none_, `1` for the **AES256-GCM AEAD** cipher, and `2` for the **ChaCha20-Poly1305 AEAD** cipher. Similarly, the `KD` can be `0` for _none_, `1` for the **Argon2id** key derivation function (KDF), and `2` for the **scrypt** KDF. When creating an archive, rather than have `EA` or `KD` rows whose values are `0` it is better to simply elide the rows entirely as _none_ will be the default.
 
 Both AES256-GCM and ChaCha20-Poly1305 use a 32-byte key and a 12-byte nonce, so the surrounding format (the `SA`, `TL`, and `IV` rows) is identical regardless of which cipher is chosen.
 
 The `SA` value length may vary but it will likely be around 16 bytes. The salt is stored as raw bytes, so if your library generates an encoded form (such as base64), you must decode it before storing in the `SA` header row.
 
-The three optional _cost_ rows are given as parameters to the key-derivation function. The `TC` value indicates the number of iterations, the `MC` value indicates the number of 1 kilobyte memory blocks to be used, and the `PC` value indicates the degree of parallelism. The **default** value for `TC` is `2`, the **default** for `MC` is `19,456`, and the **default** for `PC` is `1`. These defaults are recommended in OWASP's [password storage cheat sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html) and are the defaults in the [argon2](https://docs.rs/argon2/latest/argon2/) Rust crate.
+The three optional _cost_ rows are given as parameters to the key-derivation function. For **Argon2id**, the `TC` value indicates the number of iterations, the `MC` value indicates the number of 1 kilobyte memory blocks to be used, and the `PC` value indicates the degree of parallelism. The **default** value for `TC` is `2`, the **default** for `MC` is `19,456`, and the **default** for `PC` is `1`. These defaults are recommended in OWASP's [password storage cheat sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html) and are the defaults in the [argon2](https://docs.rs/argon2/latest/argon2/) Rust crate.
+
+Because the cost rows are simply raw `u32` values, each KDF is free to interpret them as needed. For **scrypt**, the `TC` value is reinterpreted as `log2(N)` (the base-2 logarithm of the CPU/memory cost parameter `N`), the `MC` value as the block size `r`, and the `PC` value as the parallelism `p`. The **defaults** for scrypt are `TC` = `15` (so `N` = 32,768), `MC` = `8`, and `PC` = `1`. A reader must reject parameters that would require an unreasonable amount of memory; scrypt's working memory is approximately `128 * r * N` bytes.
 
 The `TL` row is a value that may be referred to as either the _output length_ or _tag length_, which indicates the number of bytes of desired output from the key derivation function. The **default** in the Argon2 Rust crate is `32` and as such is the default for this format. In fact, for AES-256 encryption you _need_ a key of 32 bytes.
 
@@ -369,6 +371,7 @@ The content blocks have a size limit, but that is not relevant since the archive
 
 * Added support for ChaCha20-Poly1305 encryption, `EA` value is `02`.
 * Added support for Xz/LZMA2 compression, `CA` value is `02`.
+* Added support for the scrypt key derivation function, `KD` value is `02`.
 
 ### Version 1.1
 
