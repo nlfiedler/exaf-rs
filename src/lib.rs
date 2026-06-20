@@ -437,10 +437,18 @@ fn decrypt_data(ea: &Encryption, key: &[u8], data: &[u8], nonce: &[u8]) -> Resul
 ///
 /// Type of compression used on a specific content block.
 ///
-#[derive(Clone, Debug, PartialEq)]
-enum Compression {
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub enum Compression {
+    /// No compression; content is stored verbatim.
     None,
+    /// Compress content using [Zstandard](http://facebook.github.io/zstd/);
+    /// _default_.
+    #[default]
     ZStandard,
+    /// Compress content using XZ (LZMA2). Requires the `xz` crate feature.
+    #[cfg(feature = "xz")]
+    Xz,
 }
 
 impl fmt::Display for Compression {
@@ -448,6 +456,8 @@ impl fmt::Display for Compression {
         match self {
             Compression::None => write!(f, "none"),
             Compression::ZStandard => write!(f, "zstd"),
+            #[cfg(feature = "xz")]
+            Compression::Xz => write!(f, "xz"),
         }
     }
 }
@@ -457,6 +467,8 @@ impl From<Compression> for u8 {
         match val {
             Compression::None => 0,
             Compression::ZStandard => 1,
+            #[cfg(feature = "xz")]
+            Compression::Xz => 2,
         }
     }
 }
@@ -468,6 +480,8 @@ impl TryFrom<u8> for Compression {
         match value {
             0 => Ok(Compression::None),
             1 => Ok(Compression::ZStandard),
+            #[cfg(feature = "xz")]
+            2 => Ok(Compression::Xz),
             v => Err(self::Error::UnsupportedCompAlgo(v)),
         }
     }
@@ -995,10 +1009,25 @@ mod tests {
         let value = result.unwrap();
         assert_eq!(value, Compression::ZStandard);
 
-        let result = Compression::try_from(2);
+        #[cfg(feature = "xz")]
+        {
+            let result = Compression::try_from(2);
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), Compression::Xz);
+        }
+        #[cfg(not(feature = "xz"))]
+        {
+            // without the xz feature, value 2 is unsupported
+            let result = Compression::try_from(2);
+            assert!(result.is_err());
+            let err_string = result.err().unwrap().to_string();
+            assert_eq!(err_string, "unsupported compression algorithm 2");
+        }
+
+        let result = Compression::try_from(3);
         assert!(result.is_err());
         let err_string = result.err().unwrap().to_string();
-        assert_eq!(err_string, "unsupported compression algorithm 2");
+        assert_eq!(err_string, "unsupported compression algorithm 3");
     }
 
     #[test]
@@ -1008,6 +1037,12 @@ mod tests {
 
         let value: u8 = Compression::ZStandard.into();
         assert_eq!(value, 1);
+
+        #[cfg(feature = "xz")]
+        {
+            let value: u8 = Compression::Xz.into();
+            assert_eq!(value, 2);
+        }
     }
 
     #[test]

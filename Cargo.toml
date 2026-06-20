@@ -23,8 +23,18 @@ libc = "0.2.153"
 os_str_bytes = { version = "7.0.0", features = ["conversions"] }
 rand_core = "0.10.0"
 thiserror = "2.0.12"
+xz2 = { version = "0.1.7", optional = true }
 zstd = "0.13.1"
 
 [dev-dependencies]
 blake3 = "1.8.4"
 tempfile = "3.7.1"
+
+[features]
+default = []
+# Enable XZ (LZMA2) as an alternative content compression algorithm. Pulls in
+# liblzma via the `xz2` crate.
+xz = ["dep:xz2"]
+
+[package.metadata.docs.rs]
+all-features = true

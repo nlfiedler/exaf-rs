@@ -5,6 +5,16 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 This file follows the convention described at
 [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+### Added
+- Optional **XZ** (LZMA2) content compression as an alternative to Zstandard,
+  selectable via `Options::compression`. Gated behind the `xz` crate feature
+  (off by default) so the liblzma dependency is only pulled in when needed. The
+  archive format records this as compression algorithm (`CA`) value `2`.
+- The `Compression` enum is now part of the public API, and `Compression::None`
+  is selectable to store content uncompressed (the `CA` row is elided, and the
+  reader defaults an absent `CA` row to _none_).
+
 ## [3.0.0] - 2026-06-19
 ### Added
 - Support for the **ChaCha20-Poly1305** AEAD cipher as an alternative to

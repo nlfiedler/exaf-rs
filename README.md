@@ -1,29 +1,31 @@
 # Exaf
 
-The EXtensible Archiver Format describes an [archive file](https://en.wikipedia.org/wiki/Archive_file) format for compressing and archiving files. It offers an alternative to the well-known zip and 7-zip formats, with extensibility in mind. The running time of this reference implementation is similar to that of GNU tar with Zstandard compression, and the resulting file size is very similar. Encryption of both metadata and file content is implemented using Argon2id and AES256-GCM which ensures both data confidentiality and authenticity. See the [Encryption](#encryption) section below for more information.
+The EXtensible Archiver Format describes an [archive file](https://en.wikipedia.org/wiki/Archive_file) format for compressing and archiving files. It offers an alternative to the well-known zip and 7-zip formats, with extensibility in mind. The running time of this reference implementation is similar to that of GNU tar with Zstandard compression, and the resulting file size is very similar. Encryption of both metadata and file content is implemented using Argon2id and either AES256-GCM or ChaCha20-Poly1305 which ensures both data confidentiality and authenticity. See the [Encryption](#encryption) section below for more information.
 
 ## Specification
 
-See the [FORMAT.md](./FORMAT.md) document for the details on the current format, which specifies Zstandard for compression, and the Argon2id key-derivation function, along with the AES256-GCM cipher, for encryption. Future versions may add support for other algorithms as appropriate.
+See the [FORMAT.md](./FORMAT.md) document for the details on the current format, which specifies Zstandard for compression, with Xz/LZMA2 as an alternative, and the Argon2id key-derivation function, along with the AES256-GCM or ChaCha20-Poly1305 cipher, for encryption. Future versions may add support for other algorithms as appropriate.
 
 In short, the file consists of a short header which may include encryption details, followed by a manifest of directories, files, and symbolic links which are contained in the following compressed block of content. These content blocks may contain many files, up to a predefined total size, which are then compressed using Zstandard. If using encryption, the manifest and compressed content block will be encrypted with the derived key and a unique nonce. The manifest/content pair can be followed by as many additional pairs as are needed to contain everything that will be written to the archive.
 
-## Objectives
+## Features
 
-First and foremost, the purpose of this project is to satisfy my own needs, and this reference implementation is written in [Rust](https://www.rust-lang.org) so that I can use it within my own Rust-based applications. In particular, the [zorigami](https://github.com/nlfiedler/zorigami) project needed a good "pack" file format, and each of the approaches that had been tried had their drawbacks. Ideally the format would be simple, extensible, flexible, use modern compression algorithms, encrypt as much of the data as possible using the best algorithms available, and be easy to use from within any program. This project is the result of that effort. If this happens to be useful to others, fantastic, I would be more than happy to continue developing the format and/or this crate.
+### Optional Features
+
+* `xz`: Enable support for Xz/LZMA2 compression, in addition to the default Zstandard. Requires the `liblzma` library.
 
 ## Build and Run
 
 ### Prerequisites
 
-* [Rust](https://www.rust-lang.org) 2021 edition
+* [Rust](https://www.rust-lang.org) 2024 edition
 
 ### Running the tests
 
 Unit tests exist that exercise most of the functionality.
 
 ```shell
-cargo test
+cargo test --all-features
 ```
 
 ### Creating, listing, extracting archives
@@ -77,6 +79,8 @@ open target/debug/coverage/index.html
 ## Encryption
 
 With the `--password <PASSWD>` option to the commands listed above, the archive can be encrypted using a passphrase. A secret key will be derived using the [Argon2id](https://en.wikipedia.org/wiki/Argon2) algorithm and a random salt (which is then stored in the archive header), and each run of content in the archive will be encrypted with that secret key and a unique nonce (stored in the header of each manifest) using the AES256-GCM [Authenticated Encryption with Associated Data](https://en.wikipedia.org/wiki/Authenticated_encryption) cipher. The encryption includes both the entry metadata as well as the compressed file content.
+
+In addition to AES256-GCM, support for ChaCha20-Poly1305 is available via the library API.
 
 ## Prior Art
 

@@ -80,6 +80,8 @@ pub struct Options {
     file_size: bool,
     /// Save file metadata for files, links, and directories (default `false`).
     metadata: bool,
+    /// Compression algorithm to apply to content blocks (default Zstandard).
+    compression: Compression,
 }
 
 impl Options {
@@ -97,6 +99,12 @@ impl Options {
     /// Set the metadata option to the given value (`true` to save metadata).
     pub fn metadata(mut self, value: bool) -> Self {
         self.metadata = value;
+        self
+    }
+
+    /// Set the compression algorithm used for content blocks.
+    pub fn compression(mut self, value: Compression) -> Self {
+        self.compression = value;
         self
     }
 }
@@ -450,24 +458,26 @@ impl<W: Write + Seek> Writer<W> {
             Vec::with_capacity(BUNDLE_SIZE as usize)
         };
 
-        // iterate through the file contents, compressing to the buffer
-        let mut encoder = zstd::stream::write::Encoder::new(content, 0)?;
-        for item in self.contents.iter() {
-            match item.kind {
-                Kind::Link => {
-                    let value = read_link(&item.path)?;
-                    encoder.write_all(&value)?;
-                }
-                _ => {
-                    // files and slices of files are handled the same
-                    let mut input = fs::File::open(&item.path)?;
-                    input.seek(SeekFrom::Start(item.itempos))?;
-                    let mut chunk = input.take(item.size);
-                    io::copy(&mut chunk, &mut encoder)?;
-                }
+        // iterate through the file contents, compressing to the buffer; each
+        // encoder consumes and returns the underlying buffer so it can be reused
+        content = match self.options.compression {
+            Compression::ZStandard => {
+                let mut encoder = zstd::stream::write::Encoder::new(content, 0)?;
+                write_contents(&mut encoder, &self.contents)?;
+                encoder.finish()?
             }
-        }
-        content = encoder.finish()?;
+            #[cfg(feature = "xz")]
+            Compression::Xz => {
+                // level 6 is the liblzma default (good ratio/speed balance)
+                let mut encoder = xz2::write::XzEncoder::new(content, 6);
+                write_contents(&mut encoder, &self.contents)?;
+                encoder.finish()?
+            }
+            Compression::None => {
+                write_contents(&mut content, &self.contents)?;
+                content
+            }
+        };
 
         // serialize everything to an in-memory buffer to allow for easier
         // encryption, in which we need to know the block size before writing
@@ -483,7 +493,7 @@ impl<W: Write + Seek> Writer<W> {
 
         // create the manifest header
         let num_entries = (self.directories.len() + self.contents.len()) as u32;
-        let header = make_manifest_header(num_entries, content.len())?;
+        let header = make_manifest_header(num_entries, content.len(), self.options.compression)?;
         header.write_header(&mut output)?;
 
         // write all of the directory entries to the output
@@ -699,11 +709,39 @@ impl HeaderBuilder {
 }
 
 // Build the manifest header and write the bytes to the output.
-fn make_manifest_header(num_entries: u32, block_size: usize) -> Result<HeaderBuilder, Error> {
+// Write the raw (uncompressed) bytes of every incoming content item into the
+// given writer, which is typically a compression encoder wrapping the content
+// buffer. Files and symbolic links are handled the same way.
+fn write_contents<W: Write>(writer: &mut W, contents: &[IncomingContent]) -> Result<(), Error> {
+    for item in contents.iter() {
+        match item.kind {
+            Kind::Link => {
+                let value = read_link(&item.path)?;
+                writer.write_all(&value)?;
+            }
+            _ => {
+                // files and slices of files are handled the same
+                let mut input = fs::File::open(&item.path)?;
+                input.seek(SeekFrom::Start(item.itempos))?;
+                let mut chunk = input.take(item.size);
+                io::copy(&mut chunk, writer)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn make_manifest_header(
+    num_entries: u32,
+    block_size: usize,
+    compression: Compression,
+) -> Result<HeaderBuilder, Error> {
     let mut header = HeaderBuilder::new();
     header.add_u32(TAG_NUM_ENTRIES, num_entries)?;
-    // compression algorithm is always Zstandard, for now
-    header.add_u8(TAG_COMP_ALGO, Compression::ZStandard.into())?;
+    // a value of "none" is the default and is elided from the header
+    if compression != Compression::None {
+        header.add_u8(TAG_COMP_ALGO, compression.into())?;
+    }
     // block size will never larger than 2^32 bytes
     header.add_u32(TAG_BLOCK_SIZE, block_size as u32)?;
     Ok(header)
@@ -961,6 +999,53 @@ mod tests {
         builder.finish()?;
 
         // extract the archive and verify everything
+        let mut reader = super::reader::from_file(&archive)?;
+        reader.extract_all(outdir.path())?;
+        let actual = blake3_from_file(outdir.path().join("IMG_0385.JPG").as_path())?;
+        assert_eq!(
+            actual,
+            "eb32e7014330a92a93dd81e3214605816b6a96533fca9f302f5fb1ca453130cd"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_create_archive_no_compression() -> Result<(), Error> {
+        // exercise the Compression::None path, including the elided CA tag in
+        // the manifest header and the reader defaulting to "none"
+        let outdir = tempdir()?;
+        let archive = outdir.path().join("archive.exa");
+        let output = std::fs::File::create(&archive)?;
+        let options = Options::new().compression(Compression::None);
+        let mut builder = super::writer::Writer::with_options(output, options)?;
+        builder.add_file("test/fixtures/IMG_0385.JPG", None)?;
+        builder.finish()?;
+
+        let mut reader = super::reader::from_file(&archive)?;
+        reader.extract_all(outdir.path())?;
+        let actual = blake3_from_file(outdir.path().join("IMG_0385.JPG").as_path())?;
+        assert_eq!(
+            actual,
+            "eb32e7014330a92a93dd81e3214605816b6a96533fca9f302f5fb1ca453130cd"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(feature = "xz")]
+    #[test]
+    fn test_create_archive_xz() -> Result<(), Error> {
+        // round-trip a file larger than the test BUNDLE_SIZE using XZ, which
+        // forces content to be split across multiple bundles
+        let outdir = tempdir()?;
+        let archive = outdir.path().join("archive.exa");
+        let output = std::fs::File::create(&archive)?;
+        let options = Options::new().compression(Compression::Xz);
+        let mut builder = super::writer::Writer::with_options(output, options)?;
+        builder.add_file("test/fixtures/IMG_0385.JPG", None)?;
+        builder.finish()?;
+
         let mut reader = super::reader::from_file(&archive)?;
         reader.extract_all(outdir.path())?;
         let actual = blake3_from_file(outdir.path().join("IMG_0385.JPG").as_path())?;

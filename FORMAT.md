@@ -153,7 +153,7 @@ Each manifest starts with a small header that describes the rest of the manifest
 | `CA` | compression algorithm              |        1 | `u8`  |
 | `BS` | size of content in bytes           |        4 | `u32` |
 
-The values for `CA` at this time are `0` for _none_ and `1` for [Zstandard](http://facebook.github.io/zstd/). Zstandard makes for a good choice for the initial version since it is both fast and produces fairly small compressed content. When creating an archive, rather than have a `CA` row whose value is `0` it is better to simply elide that row entirely as _none_ will be the default.
+The values for `CA` at this time are `0` for _none_, `1` for [Zstandard](http://facebook.github.io/zstd/), and `2` for [XZ](https://tukaani.org/xz/) (LZMA2). Zstandard makes for a good default since it is both fast and produces fairly small compressed content, while XZ trades speed for a higher compression ratio and is well suited to archival use. When creating an archive, rather than have a `CA` row whose value is `0` it is better to simply elide that row entirely as _none_ will be the default.
 
 ### Entries
 
@@ -365,9 +365,14 @@ The content blocks have a size limit, but that is not relevant since the archive
 
 ## Revision History
 
+### Version 1.2
+
+* Added support for ChaCha20-Poly1305 encryption, `EA` value is `02`.
+* Added support for Xz/LZMA2 compression, `CA` value is `02`.
+
 ### Version 1.1
 
-* Added `LN` header row for files and links whose value is the total size of the file or link.
+* Added `LN` header row for files and links, the value is the total length in bytes of the file or symbolic link contents.
 
 ### Version 1.0
 

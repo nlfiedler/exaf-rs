@@ -425,8 +425,8 @@ impl TryFrom<HeaderMap> for Manifest {
     fn try_from(value: HeaderMap) -> Result<Self, Self::Error> {
         let num_entries = get_header_u32(&value, &TAG_NUM_ENTRIES)?
             .ok_or_else(|| Error::MissingTag("NE".into()))?;
-        let comp_num =
-            get_header_u8(&value, &TAG_COMP_ALGO)?.ok_or_else(|| Error::MissingTag("CA".into()))?;
+        // an absent compression tag defaults to "none" per the format spec
+        let comp_num = get_header_u8(&value, &TAG_COMP_ALGO)?.unwrap_or(0);
         let block_size = get_header_u32(&value, &TAG_BLOCK_SIZE)?
             .ok_or_else(|| Error::MissingTag("BS".into()))?;
         let comp_algo = Compression::try_from(comp_num)?;
@@ -627,20 +627,32 @@ impl Reader {
                         .max()
                         .unwrap_or(0);
                     let mut content = self.read_content()?;
-                    if manifest.comp_algo == Compression::ZStandard {
-                        let decoder = zstd::stream::read::Decoder::new(content.as_slice())?;
-                        let mut limited = decoder.take(expected_len + 1);
-                        limited.read_to_end(&mut buffer)?;
-                        if buffer.len() as u64 > expected_len {
-                            return Err(Error::DecompressionBomb);
-                        }
-                    } else {
-                        // the only remaining option is copy (keep the larger buffer
-                        // to optimize memory management)
+                    if manifest.comp_algo == Compression::None {
+                        // no decompression needed, simply copy (keep the larger
+                        // buffer to optimize memory management)
                         if buffer.len() > content.len() {
                             buffer.append(&mut content);
                         } else {
                             buffer = content;
+                        }
+                    } else {
+                        // decompress, limiting output to the declared size as a
+                        // hard guard against decompression bombs
+                        let decoder: Box<dyn Read> = match manifest.comp_algo {
+                            Compression::ZStandard => {
+                                Box::new(zstd::stream::read::Decoder::new(content.as_slice())?)
+                            }
+                            #[cfg(feature = "xz")]
+                            Compression::Xz => {
+                                Box::new(xz2::read::XzDecoder::new(content.as_slice()))
+                            }
+                            // None handled above; try_from rejects unknown algos
+                            _ => unreachable!("unsupported compression reached decode"),
+                        };
+                        let mut limited = decoder.take(expected_len + 1);
+                        limited.read_to_end(&mut buffer)?;
+                        if buffer.len() as u64 > expected_len {
+                            return Err(Error::DecompressionBomb);
                         }
                     }
 
