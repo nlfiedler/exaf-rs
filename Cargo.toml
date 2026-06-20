@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 aes-gcm = "0.10.3"
 argon2 = "0.5.3"
+chacha20poly1305 = "0.10.1"
 clap = "4.5.4"
 chrono = "0.4.37"
 libc = "0.2.153"

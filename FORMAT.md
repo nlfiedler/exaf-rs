@@ -309,7 +309,9 @@ As a reminder, the archive header rows related to encryption are as follows:
 | `PC` | optional degree of parallelism for KDF (_parallelism cost_) | 4 | `u32` |
 | `TL` | optional number of bytes of output for KDF (_tag length_) | 4 | `u32` |
 
-The values for `EA` at this time are `0` for _none_ and `1` for the **AES256-GCM AEAD** cipher. Similarly, the `KD` can be `0` for _none_ and `1` for the **Argon2id** key derivation function (KDF). When creating an archive, rather than have `EA` or `KD` rows whose values are `0` it is better to simply elide the rows entirely as _none_ will be the default.
+The values for `EA` at this time are `0` for _none_, `1` for the **AES256-GCM AEAD** cipher, and `2` for the **ChaCha20-Poly1305 AEAD** cipher. Similarly, the `KD` can be `0` for _none_ and `1` for the **Argon2id** key derivation function (KDF). When creating an archive, rather than have `EA` or `KD` rows whose values are `0` it is better to simply elide the rows entirely as _none_ will be the default.
+
+Both AES256-GCM and ChaCha20-Poly1305 use a 32-byte key and a 12-byte nonce, so the surrounding format (the `SA`, `TL`, and `IV` rows) is identical regardless of which cipher is chosen.
 
 The `SA` value length may vary but it will likely be around 16 bytes. The salt is stored as raw bytes, so if your library generates an encoded form (such as base64), you must decode it before storing in the `SA` header row.
 

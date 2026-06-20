@@ -337,6 +337,25 @@ fn encrypt_data(ea: &Encryption, key: &[u8], data: &[u8]) -> Result<(Vec<u8>, Ve
                 .map_err(|e| Error::InternalError(format!("aes_gcm failed: {}", e)))?;
             Ok((ciphertext, nonce.to_vec()))
         }
+        Encryption::ChaCha20Poly1305 => {
+            use chacha20poly1305::{
+                ChaCha20Poly1305, Key,
+                aead::{Aead, AeadCore, KeyInit, OsRng},
+            };
+            if key.len() != 32 {
+                return Err(Error::InvalidKdfParams(format!(
+                    "ChaCha20-Poly1305 requires a 32-byte key, got {}",
+                    key.len()
+                )));
+            }
+            let key: &Key = key.into();
+            let cipher = ChaCha20Poly1305::new(key);
+            let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+            let ciphertext = cipher
+                .encrypt(&nonce, data)
+                .map_err(|e| Error::InternalError(format!("chacha20poly1305 failed: {}", e)))?;
+            Ok((ciphertext, nonce.to_vec()))
+        }
         Encryption::None => Err(Error::UnsupportedEncAlgo(255)),
     }
 }
@@ -377,6 +396,38 @@ fn decrypt_data(ea: &Encryption, key: &[u8], data: &[u8], nonce: &[u8]) -> Resul
             let plaintext = cipher
                 .decrypt(nonce, data)
                 .map_err(|e| Error::InternalError(format!("aes_gcm failed: {}", e)))?;
+            Ok(plaintext)
+        }
+        Encryption::ChaCha20Poly1305 => {
+            use chacha20poly1305::{
+                ChaCha20Poly1305, Key,
+                aead::{
+                    Aead, AeadCore, KeyInit,
+                    generic_array::{GenericArray, typenum::Unsigned},
+                },
+            };
+            if key.len() != 32 {
+                return Err(Error::InvalidKdfParams(format!(
+                    "ChaCha20-Poly1305 requires a 32-byte key, got {}",
+                    key.len()
+                )));
+            }
+            let key: &Key = key.into();
+            let cipher = ChaCha20Poly1305::new(key);
+            // the nonce comes from the (untrusted) archive header; verify its
+            // length matches the cipher to avoid a panic on conversion
+            let nonce_size = <ChaCha20Poly1305 as AeadCore>::NonceSize::to_usize();
+            if nonce.len() != nonce_size {
+                return Err(Error::InvalidKdfParams(format!(
+                    "ChaCha20-Poly1305 requires a {}-byte nonce, got {}",
+                    nonce_size,
+                    nonce.len()
+                )));
+            }
+            let nonce: &GenericArray<u8, <ChaCha20Poly1305 as AeadCore>::NonceSize> = nonce.into();
+            let plaintext = cipher
+                .decrypt(nonce, data)
+                .map_err(|e| Error::InternalError(format!("chacha20poly1305 failed: {}", e)))?;
             Ok(plaintext)
         }
         Encryption::None => Err(Error::UnsupportedEncAlgo(255)),
@@ -426,11 +477,14 @@ impl TryFrom<u8> for Compression {
 /// Algorithm for encrypting the archive data.
 ///
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Encryption {
     /// No encryption; _default_
     None,
     /// Use the AES 256 bit GCM AEAD cipher.
     AES256GCM,
+    /// Use the ChaCha20-Poly1305 AEAD cipher.
+    ChaCha20Poly1305,
 }
 
 impl fmt::Display for Encryption {
@@ -438,6 +492,7 @@ impl fmt::Display for Encryption {
         match self {
             Encryption::None => write!(f, "none"),
             Encryption::AES256GCM => write!(f, "AES256GCM"),
+            Encryption::ChaCha20Poly1305 => write!(f, "ChaCha20-Poly1305"),
         }
     }
 }
@@ -447,6 +502,7 @@ impl From<Encryption> for u8 {
         match val {
             Encryption::None => 0,
             Encryption::AES256GCM => 1,
+            Encryption::ChaCha20Poly1305 => 2,
         }
     }
 }
@@ -458,6 +514,7 @@ impl TryFrom<u8> for Encryption {
         match value {
             0 => Ok(Encryption::None),
             1 => Ok(Encryption::AES256GCM),
+            2 => Ok(Encryption::ChaCha20Poly1305),
             v => Err(self::Error::UnsupportedEncAlgo(v)),
         }
     }
@@ -467,6 +524,7 @@ impl TryFrom<u8> for Encryption {
 /// Algorithm for deriving a key from a passphrase.
 ///
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum KeyDerivation {
     /// No derivation function, _default_
     None,
@@ -965,9 +1023,14 @@ mod tests {
         assert_eq!(value, Encryption::AES256GCM);
 
         let result = Encryption::try_from(2);
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value, Encryption::ChaCha20Poly1305);
+
+        let result = Encryption::try_from(3);
         assert!(result.is_err());
         let err_string = result.err().unwrap().to_string();
-        assert_eq!(err_string, "unsupported encryption algorithm 2");
+        assert_eq!(err_string, "unsupported encryption algorithm 3");
     }
 
     #[test]
@@ -977,6 +1040,9 @@ mod tests {
 
         let value: u8 = Encryption::AES256GCM.into();
         assert_eq!(value, 1);
+
+        let value: u8 = Encryption::ChaCha20Poly1305.into();
+        assert_eq!(value, 2);
     }
 
     #[test]
@@ -1076,6 +1142,31 @@ mod tests {
         let plain = decrypt_data(&Encryption::AES256GCM, &secret, &cipher, &nonce)?;
         // the part that matters -- the data can make the roundtrip
         assert_eq!(plain, input.as_bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_chacha() -> Result<(), Error> {
+        let password = "keyboard cat";
+        let salt = generate_salt(&KeyDerivation::Argon2id)?;
+        let params: KeyDerivationParams = Default::default();
+        let secret = derive_key(&KeyDerivation::Argon2id, password, &salt, &params)?;
+        let input = "mary had a little lamb whose fleece was white as snow";
+        assert_eq!(input.len(), 53);
+        let (cipher, nonce) =
+            encrypt_data(&Encryption::ChaCha20Poly1305, &secret, input.as_bytes())?;
+        // the cipher text is the input plus the 16-byte Poly1305 tag
+        assert_eq!(cipher.len(), 69);
+        // ChaCha20-Poly1305 uses a 96-bit (12-byte) nonce
+        assert_eq!(nonce.len(), 12);
+        let plain = decrypt_data(&Encryption::ChaCha20Poly1305, &secret, &cipher, &nonce)?;
+        assert_eq!(plain, input.as_bytes());
+        // a wrong-length key or nonce must error rather than panic
+        let short_key = vec![0u8; 16];
+        let result = decrypt_data(&Encryption::ChaCha20Poly1305, &short_key, &cipher, &nonce);
+        assert!(matches!(result, Err(Error::InvalidKdfParams(_))));
+        let result = decrypt_data(&Encryption::ChaCha20Poly1305, &secret, &cipher, &[0u8; 8]);
+        assert!(matches!(result, Err(Error::InvalidKdfParams(_))));
         Ok(())
     }
 
@@ -1383,6 +1474,46 @@ mod tests {
         assert_eq!(actual, "the lamb was sure to go.\n");
         #[cfg(target_family = "windows")]
         assert_eq!(actual, "the lamb was sure to go.\r\n");
+        Ok(())
+    }
+
+    #[test]
+    fn test_create_list_extract_chacha() -> Result<(), Error> {
+        // git does not track empty directories
+        std::fs::create_dir_all("test/fixtures/version1/tiny_tree/sub/empty-dir")?;
+        // create an archive encrypted with ChaCha20-Poly1305
+        let outdir = tempdir()?;
+        let archive = outdir.path().join("archive.exa");
+        let output = std::fs::File::create(&archive)?;
+        let mut builder = super::writer::Writer::new(output)?;
+        builder.enable_encryption(
+            super::KeyDerivation::Argon2id,
+            super::Encryption::ChaCha20Poly1305,
+            "Passw0rd!",
+        )?;
+        builder.add_dir_all("test/fixtures/version1/tiny_tree")?;
+        builder.finish()?;
+
+        // the archive reports as encrypted and lists all entries once decrypted
+        let mut reader = super::reader::Entries::new(&archive)?;
+        assert!(reader.is_encrypted());
+        reader.enable_encryption("Passw0rd!")?;
+        let entries: Vec<String> = reader
+            .filter_map(|e| e.ok())
+            .map(|e| e.name().to_owned())
+            .collect();
+        assert_eq!(entries.len(), 9);
+
+        // extract the archive and verify a representative file round-trips
+        let mut reader = super::reader::from_file(&archive)?;
+        assert!(reader.is_encrypted());
+        reader.enable_encryption("Passw0rd!")?;
+        reader.extract_all(outdir.path())?;
+        let actual = std::fs::read_to_string(outdir.path().join("tiny_tree").join("file-a.txt"))?;
+        #[cfg(target_family = "unix")]
+        assert_eq!(actual, "mary had a little lamb\n");
+        #[cfg(target_family = "windows")]
+        assert_eq!(actual, "mary had a little lamb\r\n");
         Ok(())
     }
 }

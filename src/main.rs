@@ -15,6 +15,7 @@ fn create_archive<P: AsRef<Path>>(
     archive: P,
     inputs: Vec<&PathBuf>,
     passwd: Option<&str>,
+    cipher: exaf_rs::Encryption,
 ) -> Result<u64, Error> {
     let path_ref = archive.as_ref();
     let path = match path_ref.extension() {
@@ -24,11 +25,7 @@ fn create_archive<P: AsRef<Path>>(
     let output = File::create(path)?;
     let mut builder = Writer::new(output)?;
     if let Some(password) = passwd {
-        builder.enable_encryption(
-            exaf_rs::KeyDerivation::Argon2id,
-            exaf_rs::Encryption::AES256GCM,
-            password,
-        )?;
+        builder.enable_encryption(exaf_rs::KeyDerivation::Argon2id, cipher, password)?;
     }
     let mut file_count: u64 = 0;
     for input in inputs {
@@ -102,7 +99,12 @@ fn cli() -> Command {
                         .value_parser(clap::value_parser!(PathBuf)),
                 )
                 .arg_required_else_help(true)
-                .arg(arg!(--password <PASSWD> "Password for encrypting the archive.")),
+                .arg(arg!(--password <PASSWD> "Password for encrypting the archive."))
+                .arg(
+                    arg!(--cipher <CIPHER> "Encryption cipher to use with --password.")
+                        .value_parser(["aes256-gcm", "chacha20-poly1305"])
+                        .default_value("aes256-gcm"),
+                ),
         )
         .subcommand(
             Command::new("list")
@@ -145,7 +147,11 @@ fn main() -> Result<(), Error> {
             let passwd = sub_matches
                 .get_one::<String>("password")
                 .map(|s| s.as_str());
-            let file_count = create_archive(archive, inputs, passwd)?;
+            let cipher = match sub_matches.get_one::<String>("cipher").map(|s| s.as_str()) {
+                Some("chacha20-poly1305") => exaf_rs::Encryption::ChaCha20Poly1305,
+                _ => exaf_rs::Encryption::AES256GCM,
+            };
+            let file_count = create_archive(archive, inputs, passwd, cipher)?;
             println!("Added {} files to {}", file_count, archive);
         }
         Some(("list", sub_matches)) => {

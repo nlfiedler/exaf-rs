@@ -6,6 +6,11 @@ This file follows the convention described at
 [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [3.0.0] - 2026-06-19
+### Added
+- Support for the **ChaCha20-Poly1305** AEAD cipher as an alternative to
+  AES256-GCM, selectable via `Writer::enable_encryption` or the new
+  `--cipher` option of the `create` CLI subcommand. The archive format records
+  this as encryption algorithm (`EA`) value `2`.
 ### Security
 - Prevent symlink-based path traversal during extraction. A malicious archive
   could plant a symbolic link entry and then write files "through" it to
@@ -24,12 +29,14 @@ This file follows the convention described at
 - Avoid panics when parsing malformed archive headers containing empty, short,
   or odd-length values.
 ### Changed
-- **BREAKING:** The public `Error` enum is now annotated `#[non_exhaustive]`, so
-  downstream `match` expressions must include a wildcard arm. This is a breaking
-  change under Rust semver and requires a major version bump, but it allows
-  future error variants to be added without further breakage.
+- **BREAKING:** The public `Error`, `Encryption`, and `KeyDerivation` enums are
+  now annotated `#[non_exhaustive]`, so downstream `match` expressions must
+  include a wildcard arm. This is a breaking change under Rust semver and
+  requires a major version bump, but it allows future error variants, ciphers,
+  and key-derivation functions to be added without further breakage.
 - Added the `Error::UnsafePath`, `Error::DecompressionBomb`, and
-  `Error::InvalidKdfParams` variants.
+  `Error::InvalidKdfParams` variants, and the `Encryption::ChaCha20Poly1305`
+  variant.
 
 ## [2.0.0] - 2026-04-10
 ### Changed
