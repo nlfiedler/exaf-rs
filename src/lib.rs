@@ -3,12 +3,19 @@
 //
 
 //!
-//! The `exaf_rs` crate implements the EXtensible Archiver Format and is
-//! intended to be used in compressing and archiving files. It offers an
-//! alternative to the well-known zip and 7-zip formats, with extensibility in
-//! mind. The running time of this reference implementation is similar to that
-//! of GNU tar with Zstandard compression, and the resulting file size is very
-//! similar.
+//! The `exaf_rs` crate implements the EXtensible Archiver Format which is
+//! designed for compressing and archiving files. Both data compression and
+//! encryption are optional, with Zstandard compression enabled by default.
+//! Encryption requires a passphrase from which a secret key will be derived,
+//! and along with a unique nonce, each manifest and content pair will be
+//! encrypted.
+//!
+//! ## Features
+//!
+//! * `scrypt`: Enable the **scrypt** key derivation function as an alternative
+//!   to the default **Argon2id**.
+//! * `xz`: Enable support for **Xz/LZMA2** compression, in addition to the
+//!   default **Zstandard**. Requires the `liblzma` library.
 //!
 //! ## Examples
 //!
